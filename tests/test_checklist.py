@@ -7,6 +7,8 @@ def test_checklist_mentions_trust_and_developer_mode() -> None:
     assert "Developer Mode" in text
     assert "USB" in text
     assert "Apple Mobile Device" in text
+    assert "this PC asks iOS to show Developer Mode" in text
+    assert "Settings > Privacy & Security" in text
 
 
 def test_what_this_is_is_not_apple_mirroring() -> None:
