@@ -2,17 +2,53 @@
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass, field
 from typing import Optional
 
 
-CHECKLIST_STEPS: tuple[str, ...] = (
-    "Apple Mobile Device Support",
-    "USB",
-    "Trust",
-    "Developer Mode",
-    "Connect",
-)
+def _system_name(system: str | None = None) -> str:
+    return (system or platform.system()).strip().lower()
+
+
+def phone_helper_label(system: str | None = None) -> str:
+    """First checklist row: the USB mux helper on this OS."""
+    if _system_name(system) == "linux":
+        return "usbmuxd"
+    return "Apple Mobile Device Support"
+
+
+def phone_helper_missing_detail(system: str | None = None) -> str:
+    """Setup-screen detail when the helper is not reachable."""
+    if _system_name(system) == "linux":
+        return (
+            "usbmuxd is not reachable. Install it with: sudo apt install usbmuxd "
+            "(Debian/Ubuntu), then replug USB."
+        )
+    return (
+        "Apple Mobile Device / usbmux is not reachable. "
+        "Install Apple Mobile Device Support, then replug USB."
+    )
+
+
+def phone_helper_missing_error(system: str | None = None) -> str:
+    """Connect error when the helper is not running."""
+    if _system_name(system) == "linux":
+        return "usbmuxd is not running. Install it with: sudo apt install usbmuxd (Debian/Ubuntu)."
+    return "Apple Mobile Device / usbmux is not running. Install Apple Mobile Device Support."
+
+
+def checklist_steps(system: str | None = None) -> tuple[str, ...]:
+    return (
+        phone_helper_label(system),
+        "USB",
+        "Trust",
+        "Developer Mode",
+        "Connect",
+    )
+
+
+CHECKLIST_STEPS: tuple[str, ...] = checklist_steps()
 
 
 @dataclass(frozen=True)
@@ -33,6 +69,7 @@ def format_step_state(
     usb_present: bool,
     paired: Optional[bool],
     developer_mode: Optional[bool],
+    system: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return (label, state) pairs for the UI. state is ok, wait, or fail."""
 
@@ -41,22 +78,23 @@ def format_step_state(
             return waiting
         return ok if value else fail
 
+    steps = checklist_steps(system)
     return [
         (
-            CHECKLIST_STEPS[0],
+            steps[0],
             "ok" if apple_mobile_device else "fail",
         ),
         (
-            CHECKLIST_STEPS[1],
+            steps[1],
             "ok" if usb_present else "wait",
         ),
         (
-            CHECKLIST_STEPS[2],
+            steps[2],
             _tri(paired, "wait", "ok", "wait"),
         ),
         (
-            CHECKLIST_STEPS[3],
+            steps[3],
             _tri(developer_mode, "wait", "ok", "fail"),
         ),
-        (CHECKLIST_STEPS[4], "wait"),
+        (steps[4], "wait"),
     ]

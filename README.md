@@ -5,7 +5,7 @@
 [![downloads](https://img.shields.io/github/downloads/helv-io/iphone-desk/total)](https://github.com/helv-io/iphone-desk/releases)
 [![license](https://img.shields.io/github/license/helv-io/iphone-desk)](LICENSE)
 
-Windows app that shows a trusted iPhone over USB and sends touch, keys, and hardware buttons.
+Windows and Linux app that shows a trusted iPhone over USB and sends touch, keys, and hardware buttons.
 
 Not Apple iPhone Mirroring. Not Continuity. Not a jailbreak. The phone must tap Trust on this PC, and Developer Mode must be on.
 
@@ -24,6 +24,28 @@ winget install Apple.AppleMobileDeviceSupport
 ```
 
 iTunes is not required.
+
+On Linux, download `iPhoneDesk-<version>-linux-x86_64.AppImage` from the same release, then:
+
+```bash
+chmod +x iPhoneDesk-*-linux-x86_64.AppImage
+./iPhoneDesk-*-linux-x86_64.AppImage
+```
+
+If the setup screen says the phone helper is missing, install usbmuxd (do not run sudo from the app):
+
+```bash
+# Debian / Ubuntu
+sudo apt install usbmuxd
+
+# Fedora
+sudo dnf install usbmuxd
+
+# Arch
+sudo pacman -S usbmuxd
+```
+
+After usbmuxd is running, auto-scan / Connect works the same as on Windows. The AppImage does not bundle that daemon.
 
 ## First run
 
@@ -56,7 +78,7 @@ H.264 / Valeria is not shipped. On Windows that path needs WinUSB/Zadig, which r
 
 ## From source
 
-Windows 10/11, Python 3.12+.
+Windows 10/11 or Linux, Python 3.12+.
 
 ```bat
 start.bat
@@ -72,11 +94,24 @@ python -m iphone_desk
 python -m pytest
 ```
 
-Build the exe:
+Build the Windows zip:
 
 ```bat
 packaging\build.ps1
 ```
+
+On Linux:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python -m iphone_desk
+python -m pytest
+./packaging/build-appimage.sh
+```
+
+The host still needs usbmuxd. The AppImage does not bundle that daemon.
 
 ## Credits
 

@@ -1,8 +1,32 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "iphone_desk.egg-info"}
-TEXT_SUFFIXES = {".py", ".md", ".toml", ".txt", ".bat", ".ps1", ".gitignore"}
+SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "iphone_desk.egg-info",
+    "dist",
+    "build",
+    "AppDir",
+    "squashfs-root",
+}
+TEXT_SUFFIXES = {
+    ".py",
+    ".md",
+    ".toml",
+    ".txt",
+    ".bat",
+    ".ps1",
+    ".sh",
+    ".yml",
+    ".yaml",
+    ".desktop",
+    ".spec",
+    ".gitignore",
+}
 
 
 def test_repo_text_has_no_em_dash() -> None:

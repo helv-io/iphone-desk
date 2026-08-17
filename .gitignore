@@ -5,6 +5,10 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+packaging/.tools/
+*.AppImage
+AppDir/
+squashfs-root/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

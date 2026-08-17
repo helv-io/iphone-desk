@@ -11,7 +11,11 @@ from typing import Any, Optional
 
 from packaging.version import Version
 
-from iphone_desk.checklist import ChecklistStatus
+from iphone_desk.checklist import (
+    ChecklistStatus,
+    phone_helper_missing_detail,
+    phone_helper_missing_error,
+)
 from iphone_desk.coords import Size
 from iphone_desk.display import parse_display_size
 from iphone_desk.errors import (
@@ -196,10 +200,7 @@ async def probe_checklist() -> ChecklistStatus:
             usb_present=False,
             paired=None,
             developer_mode=None,
-            detail=(
-                "Apple Mobile Device / usbmux is not reachable. "
-                "Install Apple Mobile Device Support, then replug USB."
-            ),
+            detail=phone_helper_missing_detail(),
         )
 
     devices = await list_devices()
@@ -368,9 +369,7 @@ class DeviceSession:
         try:
             devices = await list_devices()
         except ConnectionFailedToUsbmuxdError as exc:
-            raise DriverMissingError(
-                "Apple Mobile Device / usbmux is not running. Install Apple Mobile Device Support."
-            ) from exc
+            raise DriverMissingError(phone_helper_missing_error()) from exc
 
         target = pick_usbmux_device(devices, serial)
         if target is None:

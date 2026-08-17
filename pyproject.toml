@@ -5,19 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "iphone-desk"
 version = "0.4.0"
-description = "Windows desktop viewer and touch client for a trusted, Developer Mode iPhone over USB."
+description = "Windows and Linux desktop viewer and touch client for a trusted, Developer Mode iPhone over USB."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
     { name = "Helvio Pedreschi", email = "helvio88@gmail.com" },
 ]
-keywords = ["iphone", "developer-mode", "pymobiledevice3", "windows"]
+keywords = ["iphone", "developer-mode", "pymobiledevice3", "windows", "linux"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications :: Qt",
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

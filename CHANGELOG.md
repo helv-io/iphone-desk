@@ -19,12 +19,17 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Core Device stills: `ScreenCaptureService` as its own mode.
 - Lockdown screenshotr: `com.apple.mobile.screenshotr` as its own mode.
 - Auto: try HEVC, then DVT, then Core Device, then screenshotr, and show which one stuck.
+- Linux AppImage (`iPhoneDesk-<version>-linux-x86_64.AppImage`) built from the same PyInstaller onedir, wrapped with linuxdeploy
+- One GitHub Release per version tag ships both the Windows zip and the Linux AppImage
+- `packaging/build-appimage.sh` for a local Linux build using `.venv`, matching `packaging/build.ps1` on Windows
+- Setup-screen / `DriverMissingError` copy is OS-aware. On Linux it tells you to install usbmuxd (`sudo apt install usbmuxd` on Debian/Ubuntu)
 
 ### Changed
 
 - usbmux picker accepts ConnectionType USB only. `set_enable_wifi_connections` is not called.
 - Named modes do not silently fall back. A failed mode shows the real error and leaves the last good frame.
 - Screenshot modes never call `startmediastream` / `ScreenStreamServer` / `touch_session`.
+- Tagged releases build Windows and Linux in parallel, then one job publishes both files. Two `action-gh-release` jobs on the same tag would race.
 
 ### Notes
 
