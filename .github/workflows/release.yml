@@ -55,7 +55,7 @@ jobs:
           Copy-Item $src $dst
           Get-Item $dst | Format-List FullName, Length
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iPhoneDesk-${{ steps.ver.outputs.name }}-windows-x64
           path: dist/iPhoneDesk-*-windows-x64.exe
