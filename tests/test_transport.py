@@ -9,13 +9,12 @@ import pytest
 from iphone_desk.device import (
     NO_DEVICE_STATUS,
     DeviceSession,
-    ensure_wifi_connections,
     pick_usbmux_device,
     probe_checklist,
-    transport_label,
     usbmux_connection_type,
 )
 from iphone_desk.errors import DeveloperModeRequiredError, NoDeviceError, NoUsbDeviceError
+from iphone_desk.video_modes import VIDEO_MODE_DVT
 
 
 class FakeMuxDevice:
@@ -34,30 +33,21 @@ class FakeLockdown:
         developer_mode: bool = False,
         product_version: str = "18.5",
         display_name: str = "Helvio",
-        wifi_on: bool = False,
-        wifi_setter: bool = True,
     ) -> None:
         self.paired = paired
         self.product_version = product_version
         self.display_name = display_name
         self.udid = "00008030-001"
         self._developer_mode = developer_mode
-        self._wifi_on = wifi_on
-        self._wifi_setter = wifi_setter
-        self.wifi_sets: list[bool] = []
         self.closed = False
+        self.wifi_sets: list[bool] = []
 
     async def get_developer_mode_status(self) -> bool:
         return self._developer_mode
 
-    async def get_enable_wifi_connections(self) -> bool:
-        return self._wifi_on
-
     async def set_enable_wifi_connections(self, value: bool) -> None:
-        if not self._wifi_setter:
-            raise RuntimeError("wifi setter exploded")
         self.wifi_sets.append(bool(value))
-        self._wifi_on = bool(value)
+        raise AssertionError("set_enable_wifi_connections must not be called")
 
     async def close(self) -> None:
         self.closed = True
@@ -124,20 +114,17 @@ def _install_pymd3(
         monkeypatch.setitem(sys.modules, name, mod)
 
 
-def test_picker_prefers_usb_over_network_for_same_serial() -> None:
+def test_picker_uses_usb_and_ignores_network() -> None:
     usb = FakeMuxDevice("00008030-001", "USB")
     wifi = FakeMuxDevice("00008030-001", "Network")
     picked = pick_usbmux_device([wifi, usb], "00008030-001")
     assert picked is usb
     assert usbmux_connection_type(picked) == "USB"
-    assert transport_label(wifi) == "WiFi"
 
 
-def test_picker_uses_network_when_only_network_is_present() -> None:
+def test_picker_rejects_network_only() -> None:
     wifi = FakeMuxDevice("00008030-001", "Network")
-    picked = pick_usbmux_device([wifi])
-    assert picked is wifi
-    assert usbmux_connection_type(picked) == "Network"
+    assert pick_usbmux_device([wifi]) is None
 
 
 def test_no_usb_error_is_no_device_error() -> None:
@@ -146,52 +133,7 @@ def test_no_usb_error_is_no_device_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_wifi_connections_sets_when_off() -> None:
-    lockdown = FakeLockdown(wifi_on=False)
-    assert await ensure_wifi_connections(lockdown) is True
-    assert lockdown.wifi_sets == [True]
-
-
-@pytest.mark.asyncio
-async def test_ensure_wifi_connections_skips_when_already_on() -> None:
-    lockdown = FakeLockdown(wifi_on=True)
-    assert await ensure_wifi_connections(lockdown) is True
-    assert lockdown.wifi_sets == []
-
-
-@pytest.mark.asyncio
-async def test_ensure_wifi_connections_soft_fails() -> None:
-    lockdown = FakeLockdown(wifi_on=False, wifi_setter=False)
-    assert await ensure_wifi_connections(lockdown) is False
-    bare = types.SimpleNamespace()
-    assert await ensure_wifi_connections(bare) is False
-
-
-@pytest.mark.asyncio
-async def test_connect_uses_network_when_only_network_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lockdown = FakeLockdown(developer_mode=False)
-    calls: list[dict[str, Any]] = []
-    _install_pymd3(
-        monkeypatch,
-        lockdown=lockdown,
-        devices=[FakeMuxDevice("00008030-001", "Network")],
-        create_calls=calls,
-    )
-    monkeypatch.setattr("iphone_desk.device.reveal_developer_mode_option", _async_true)
-    session = DeviceSession()
-    statuses: list[str] = []
-    with pytest.raises(DeveloperModeRequiredError):
-        await session.connect(prefer_hevc=False, on_status=statuses.append)
-    assert calls[0]["connection_type"] == "Network"
-    assert lockdown.wifi_sets == [True]
-    assert any("Pairing over WiFi" in item for item in statuses)
-    await session.close()
-
-
-@pytest.mark.asyncio
-async def test_connect_prefers_usb_when_both_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_connect_uses_usb_when_both_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     lockdown = FakeLockdown(developer_mode=False)
     calls: list[dict[str, Any]] = []
     _install_pymd3(
@@ -207,50 +149,45 @@ async def test_connect_prefers_usb_when_both_visible(monkeypatch: pytest.MonkeyP
     session = DeviceSession()
     statuses: list[str] = []
     with pytest.raises(DeveloperModeRequiredError):
-        await session.connect(prefer_hevc=False, on_status=statuses.append)
+        await session.connect(video_mode=VIDEO_MODE_DVT, on_status=statuses.append)
     assert calls[0]["connection_type"] == "USB"
-    assert lockdown.wifi_sets == [True]
+    assert lockdown.wifi_sets == []
     assert any("Pairing over USB" in item for item in statuses)
     await session.close()
 
 
 @pytest.mark.asyncio
-async def test_wifi_enable_missing_does_not_break_usb(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_connect_ignores_network_only(monkeypatch: pytest.MonkeyPatch) -> None:
     lockdown = FakeLockdown(developer_mode=False)
-    lockdown.set_enable_wifi_connections = None
-    lockdown.get_enable_wifi_connections = None
     calls: list[dict[str, Any]] = []
     _install_pymd3(
         monkeypatch,
         lockdown=lockdown,
-        devices=[FakeMuxDevice("00008030-001", "USB")],
+        devices=[FakeMuxDevice("00008030-001", "Network")],
         create_calls=calls,
     )
-    monkeypatch.setattr("iphone_desk.device.reveal_developer_mode_option", _async_true)
     session = DeviceSession()
-    with pytest.raises(DeveloperModeRequiredError):
-        await session.connect(prefer_hevc=False)
-    assert calls[0]["connection_type"] == "USB"
+    with pytest.raises(NoDeviceError) as caught:
+        await session.connect(video_mode=VIDEO_MODE_DVT)
+    assert str(caught.value) == NO_DEVICE_STATUS
+    assert calls == []
     await session.close()
 
 
 @pytest.mark.asyncio
-async def test_connect_without_devices_mentions_usb_and_wifi(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_connect_without_devices_is_usb_only(monkeypatch: pytest.MonkeyPatch) -> None:
     lockdown = FakeLockdown()
     _install_pymd3(monkeypatch, lockdown=lockdown, devices=[], create_calls=[])
     session = DeviceSession()
     with pytest.raises(NoDeviceError) as caught:
-        await session.connect(prefer_hevc=False)
-    assert "USB" in str(caught.value)
-    assert "WiFi" in str(caught.value)
-    assert "wake" in str(caught.value).lower()
+        await session.connect(video_mode=VIDEO_MODE_DVT)
+    assert str(caught.value) == NO_DEVICE_STATUS
+    assert "WiFi" not in str(caught.value)
     await session.close()
 
 
 @pytest.mark.asyncio
-async def test_probe_accepts_network_device(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_probe_ignores_network_device(monkeypatch: pytest.MonkeyPatch) -> None:
     lockdown = FakeLockdown(paired=True, developer_mode=True)
     calls: list[dict[str, Any]] = []
     _install_pymd3(
@@ -259,20 +196,15 @@ async def test_probe_accepts_network_device(monkeypatch: pytest.MonkeyPatch) -> 
         devices=[FakeMuxDevice("00008030-001", "Network")],
         create_calls=calls,
     )
-    monkeypatch.setattr("iphone_desk.device.reveal_developer_mode_option", _async_true)
     status = await probe_checklist()
     assert status.usb_present is False
-    assert status.wifi_present is True
-    assert status.ready_to_connect()
-    assert status.paired is True
-    assert calls[0]["connection_type"] == "Network"
-    assert lockdown.wifi_sets == [True]
-    assert "WiFi" in status.detail
-    assert any(label.endswith("(WiFi)") for label in status.device_labels)
+    assert not status.ready_to_connect()
+    assert calls == []
+    assert status.detail == NO_DEVICE_STATUS
 
 
 @pytest.mark.asyncio
-async def test_probe_prefers_usb_when_both_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_probe_uses_usb_when_both_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     lockdown = FakeLockdown(paired=True, developer_mode=True)
     calls: list[dict[str, Any]] = []
     _install_pymd3(
@@ -287,17 +219,27 @@ async def test_probe_prefers_usb_when_both_visible(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("iphone_desk.device.reveal_developer_mode_option", _async_true)
     status = await probe_checklist()
     assert status.usb_present is True
-    assert status.wifi_present is True
     assert calls[0]["connection_type"] == "USB"
-    assert "USB and WiFi" in status.detail
+    assert "USB" in status.detail
+    assert "WiFi" not in status.detail
+    assert lockdown.wifi_sets == []
 
 
 @pytest.mark.asyncio
-async def test_probe_empty_mentions_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_probe_empty_is_usb_message(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_pymd3(monkeypatch, lockdown=FakeLockdown(), devices=[], create_calls=[])
     status = await probe_checklist()
     assert status.detail == NO_DEVICE_STATUS
     assert not status.ready_to_connect()
+
+
+def test_product_code_does_not_enable_wifi() -> None:
+    from pathlib import Path
+
+    text = Path(__file__).resolve().parents[1].joinpath("iphone_desk", "device.py").read_text()
+    assert "set_enable_wifi_connections" not in text
+    assert "get_enable_wifi_connections" not in text
+    assert "ensure_wifi_connections" not in text
 
 
 async def _async_true(_lockdown: Any) -> bool:

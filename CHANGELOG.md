@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-17
+
+### Removed
+
+- WiFi / Network usbmux as a connect path. It did not work. USB only again. The 0.3.0 WiFi history below is kept as history.
+
+### Added
+
+- Visible Video mode control (combo, last choice persisted). Switch after Connect reconnects the picture path only.
+- HEVC live: CoreDevice DisplayService `start_video_stream`, local PyAV decode (no browser / WebCodecs). Queries `get-media-support-info` / `get-media-stream-server-status` when present. Sticky keyframe + RPS recovery like pymobiledevice3 serve-vnc. Decoder sub-option: PyAV auto or PyAV software.
+- DVT screenshots: hot Instruments channel, JPEG if the service offers it, decode in memory, latest frame wins.
+- Core Device stills: `ScreenCaptureService` as its own mode.
+- Lockdown screenshotr: `com.apple.mobile.screenshotr` as its own mode.
+- Auto: try HEVC, then DVT, then Core Device, then screenshotr, and show which one stuck.
+
+### Changed
+
+- usbmux picker accepts ConnectionType USB only. `set_enable_wifi_connections` is not called.
+- Named modes do not silently fall back. A failed mode shows the real error and leaves the last good frame.
+- Screenshot modes never call `startmediastream` / `ScreenStreamServer` / `touch_session`.
+
+### Notes
+
+- H.264 / Valeria was not shipped. Upstream dropped the libusb backend. On Windows, libusb usually needs WinUSB/Zadig, which replaces Apple Mobile Device Support.
+
 ## [0.3.0] - 2026-08-17
 
 ### Added
@@ -75,6 +100,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Checklist for Apple Mobile Device Support, Trust, and Developer Mode
 - pymobiledevice3 CoreDevice screen and HID through a userspace RSD tunnel
 
+[0.4.0]: https://github.com/helv-io/iphone-desk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/helv-io/iphone-desk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/helv-io/iphone-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/helv-io/iphone-desk/compare/v0.1.0...v0.2.0

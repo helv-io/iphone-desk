@@ -1,11 +1,32 @@
-"""Preview-frame helpers for the screenshot fallback path."""
+"""Preview-frame helpers. Decode stays in memory. Latest frame wins."""
 
 from __future__ import annotations
 
 from io import BytesIO
+from typing import Generic, Optional, TypeVar
 
 PREVIEW_MAX_HEIGHT = 1000
 PREVIEW_JPEG_QUALITY = 70
+
+T = TypeVar("T")
+
+
+class LatestSlot(Generic[T]):
+    """One-item holder. A newer put replaces the unread value."""
+
+    def __init__(self) -> None:
+        self._item: Optional[T] = None
+
+    def put(self, item: T) -> None:
+        self._item = item
+
+    def take(self) -> Optional[T]:
+        item = self._item
+        self._item = None
+        return item
+
+    def peek(self) -> Optional[T]:
+        return self._item
 
 
 def rolling_fps(timestamps: list[float]) -> float:
@@ -96,3 +117,31 @@ def prepare_preview_frame(
     out = BytesIO()
     image.save(out, format="JPEG", quality=max(30, min(95, int(quality))), optimize=False)
     return out.getvalue()
+
+
+def decode_still_to_bgra(
+    data: bytes,
+    *,
+    max_height: int = PREVIEW_MAX_HEIGHT,
+) -> Optional[tuple[int, int, bytes]]:
+    """Decode a PNG/JPEG/TIFF still from memory into downscaled BGRA."""
+    if not data:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        image = Image.open(BytesIO(data))
+        image.load()
+    except Exception:
+        return None
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    height = int(image.height)
+    width = int(image.width)
+    if max_height > 0 and height > max_height:
+        width = max(1, int(round(width * (max_height / height))))
+        image = image.resize((width, max_height), Image.Resampling.BILINEAR)
+        height = max_height
+    return width, height, image.tobytes("raw", "BGRA")

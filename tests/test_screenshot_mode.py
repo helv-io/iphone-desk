@@ -7,6 +7,13 @@ import pytest
 
 from iphone_desk.device import DeviceSession
 from iphone_desk.errors import TOUCH_BLOCKED_STATUS
+from iphone_desk.video_modes import (
+    VIDEO_MODE_AUTO,
+    VIDEO_MODE_CORE,
+    VIDEO_MODE_DVT,
+    VIDEO_MODE_HEVC,
+    VIDEO_MODE_SCREENSHOTR,
+)
 
 HELVIO_STARTMEDIASTREAM = (
     "Failed to invoke: com.apple.coredevice.feature.startmediastream. "
@@ -15,6 +22,23 @@ HELVIO_STARTMEDIASTREAM = (
     "'Remote control requires iOS 27.0 or later on this device.'}}}"
 )
 
+FORBIDDEN = ("touch_session(", "ScreenStreamServer(", "start_video_stream(", "startmediastream")
+
+
+def _fn_body(name: str) -> str:
+    text = Path(__file__).resolve().parents[1].joinpath("iphone_desk", "device.py").read_text()
+    start = text.index(f"async def {name}")
+    nxt = text.find("\n    async def ", start + 1)
+    return text[start:nxt] if nxt != -1 else text[start:]
+
+
+def test_still_mode_sources_do_not_open_stream() -> None:
+    for name in ("_start_dvt_stills", "_start_core_stills", "_start_screenshotr", "_screenshot_loop"):
+        body = _fn_body(name)
+        for token in FORBIDDEN:
+            assert token not in body, f"{name} contains {token}"
+        assert "from pymobiledevice3" not in body
+
 
 class FakeService:
     opened: list[str] = []
@@ -22,8 +46,9 @@ class FakeService:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def __call__(self, rsd: Any) -> FakeService:
+    def __call__(self, rsd: Any = None, lockdown: Any = None) -> FakeService:
         self.rsd = rsd
+        self.lockdown = lockdown
         return self
 
     async def __aenter__(self) -> FakeService:
@@ -39,36 +64,19 @@ class FakeService:
     async def get_screenshot(self) -> bytes:
         return b"\x89PNG"
 
+    async def take_screenshot(self) -> bytes:
+        return b"\x89PNG"
+
     @classmethod
     def reset(cls) -> None:
         cls.opened = []
 
 
-def test_screenshot_mode_source_does_not_open_touch_session() -> None:
-    text = Path(__file__).resolve().parents[1].joinpath("iphone_desk", "device.py").read_text()
-    start = text.index("async def _start_screenshot_mode")
-    end = text.index("async def _open_indigo_buttons")
-    body = text[start:end]
-    assert "touch_session(" not in body
-    assert "ScreenStreamServer(" not in body
-    assert "start_video_stream(" not in body
-    assert "from pymobiledevice3" not in body
-
-
 @pytest.mark.asyncio
-async def test_screenshot_connect_does_not_open_touch_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_dvt_mode_does_not_open_touch_session(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeService.reset()
-    capture = FakeService("capture")
     indigo = FakeService("indigo")
     hid = FakeService("hid")
-    touch_calls: list[Any] = []
-
-    def touch_session(rsd: Any) -> None:
-        touch_calls.append(rsd)
-        raise AssertionError("touch_session must not be used in screenshot mode")
-
     dvt = FakeService("dvt")
     shot = FakeService("shot")
     monkeypatch.setattr("iphone_desk.device._load_dvt_screenshot", lambda: (dvt, shot))
@@ -76,83 +84,62 @@ async def test_screenshot_connect_does_not_open_touch_session(
     monkeypatch.setattr("iphone_desk.device._load_universal_hid", lambda: hid)
     monkeypatch.setattr(
         "iphone_desk.device._load_screen_capture",
-        lambda: (_ for _ in ()).throw(AssertionError("ScreenCapture is fallback only")),
+        lambda: (_ for _ in ()).throw(AssertionError("Core Device is a different mode")),
     )
 
     statuses: list[str] = []
     session = DeviceSession()
     session._rsd = object()
-    await session._start_screenshot_mode(8.0, None, statuses.append)
+    await session._start_named_mode(VIDEO_MODE_DVT, statuses.append)
 
-    assert touch_calls == []
     assert "dvt" in FakeService.opened
     assert "shot" in FakeService.opened
-    assert "indigo" in FakeService.opened
-    assert "hid" in FakeService.opened
     assert session._shot_task is not None
-    assert session.touch_available is True
+    assert session._picture_mode == VIDEO_MODE_DVT
     await session.close()
 
 
 @pytest.mark.asyncio
-async def test_startmediastream_ios27_falls_back_to_screenshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_explicit_hevc_does_not_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[str] = []
 
     async def boom(self: DeviceSession, *, on_status: Any) -> None:
         raise RuntimeError(HELVIO_STARTMEDIASTREAM)
 
-    async def shots(self: DeviceSession, fps: float, on_frame: Any, on_status: Any) -> None:
-        started.append("screenshot")
-        on_status("screenshot ready")
+    async def shots(self: DeviceSession, on_status: Any) -> None:
+        started.append("dvt")
 
     monkeypatch.setattr(DeviceSession, "_start_hevc", boom)
-    monkeypatch.setattr(DeviceSession, "_start_screenshot_mode", shots)
-
-    statuses: list[str] = []
+    monkeypatch.setattr(DeviceSession, "_start_dvt_stills", shots)
     session = DeviceSession()
-    mode = await session._start_screen(
-        prefer_hevc=True,
-        screenshot_fps=8.0,
-        on_frame=None,
-        on_status=statuses.append,
-    )
-    assert mode == "screenshot"
-    assert started == ["screenshot"]
-    assert any("screenshot" in item.lower() for item in statuses)
-    assert all("bplist" not in item for item in statuses)
-    assert all("9021" not in item for item in statuses)
+    with pytest.raises(RuntimeError, match="9021"):
+        await session._start_screen(VIDEO_MODE_HEVC, lambda _m: None)
+    assert started == []
 
 
 @pytest.mark.asyncio
-async def test_screenshot_only_skips_hevc_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    probes = 0
+async def test_auto_falls_back_and_names_winner(monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[str] = []
 
-    async def probe(self: DeviceSession) -> None:
-        nonlocal probes
-        probes += 1
+    async def boom(self: DeviceSession, *, on_status: Any) -> None:
+        raise RuntimeError(HELVIO_STARTMEDIASTREAM)
 
-    async def shots(self: DeviceSession, fps: float, on_frame: Any, on_status: Any) -> None:
-        started.append("screenshot")
+    async def dvt(self: DeviceSession, on_status: Any) -> None:
+        started.append("dvt")
+        on_status("dvt ready")
 
-    monkeypatch.setattr(DeviceSession, "_probe_remote_control_video", probe)
-    monkeypatch.setattr(DeviceSession, "_start_screenshot_mode", shots)
+    monkeypatch.setattr(DeviceSession, "_start_hevc", boom)
+    monkeypatch.setattr(DeviceSession, "_start_dvt_stills", dvt)
+    statuses: list[str] = []
     session = DeviceSession()
-    mode = await session._start_screen(
-        prefer_hevc=False,
-        screenshot_fps=8.0,
-        on_frame=None,
-        on_status=lambda _m: None,
-    )
-    assert mode == "screenshot"
-    assert probes == 0
-    assert started == ["screenshot"]
+    mode = await session._start_screen(VIDEO_MODE_AUTO, statuses.append)
+    assert mode == VIDEO_MODE_DVT
+    assert started == ["dvt"]
+    assert any("DVT screenshots" in item for item in statuses)
 
 
 @pytest.mark.asyncio
-async def test_dvt_failure_uses_oneshot_screencapture(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_core_mode_uses_screencapture(monkeypatch: pytest.MonkeyPatch) -> None:
     class OneShotCapture:
         opened = 0
         closed = 0
@@ -172,27 +159,75 @@ async def test_dvt_failure_uses_oneshot_screencapture(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(
         "iphone_desk.device._load_dvt_screenshot",
-        lambda: (_ for _ in ()).throw(RuntimeError("dvt down")),
+        lambda: (_ for _ in ()).throw(AssertionError("DVT is a different mode")),
     )
     monkeypatch.setattr("iphone_desk.device._load_screen_capture", lambda: OneShotCapture())
 
     session = DeviceSession()
     session._rsd = object()
     statuses: list[str] = []
-    assert await session._open_screenshot_capture(statuses.append) is True
+    await session._start_named_mode(VIDEO_MODE_CORE, statuses.append)
     assert session._screencapture_oneshot is True
     assert session._capture_backend == "screencapture"
     assert OneShotCapture.opened == 1
     assert OneShotCapture.closed == 1
-    frame = await session._capture_png()
+    frame = await session._capture_still()
     assert frame.startswith(b"\x89PNG")
     assert OneShotCapture.opened == 2
-    assert OneShotCapture.closed == 2
-    assert any("ScreenCapture" in item for item in statuses)
+    assert any("Core Device" in item or "screen-capture" in item for item in statuses)
+    await session.close()
 
 
 @pytest.mark.asyncio
-async def test_tap_without_hid_stays_human(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_screenshotr_mode_uses_lockdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeShot:
+        def __init__(self, lockdown: Any) -> None:
+            self.lockdown = lockdown
+
+        async def take_screenshot(self) -> bytes:
+            return b"\x89PNG"
+
+    monkeypatch.setattr("iphone_desk.device._load_screenshotr", lambda: FakeShot)
+    session = DeviceSession()
+    session._lockdown = object()
+    statuses: list[str] = []
+    await session._start_named_mode(VIDEO_MODE_SCREENSHOTR, statuses.append)
+    assert session._capture_backend == "screenshotr"
+    assert session._picture_mode == VIDEO_MODE_SCREENSHOTR
+    frame = await session._capture_still()
+    assert frame.startswith(b"\x89PNG")
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_switch_restores_previous_mode_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    started: list[str] = []
+
+    async def dvt(self: DeviceSession, on_status: Any) -> None:
+        started.append("dvt")
+        self._picture_mode = VIDEO_MODE_DVT
+
+    async def boom(self: DeviceSession, *, on_status: Any) -> None:
+        started.append("hevc")
+        raise RuntimeError(HELVIO_STARTMEDIASTREAM)
+
+    async def stop(self: DeviceSession) -> None:
+        self._picture_mode = ""
+
+    monkeypatch.setattr(DeviceSession, "_start_dvt_stills", dvt)
+    monkeypatch.setattr(DeviceSession, "_start_hevc", boom)
+    monkeypatch.setattr(DeviceSession, "_stop_picture", stop)
+    session = DeviceSession()
+    session._rsd = object()
+    session._picture_mode = VIDEO_MODE_DVT
+    session.summary = None
+    with pytest.raises(RuntimeError, match="9021"):
+        await session.switch_picture(VIDEO_MODE_HEVC)
+    assert started == ["hevc", "dvt"]
+
+
+@pytest.mark.asyncio
+async def test_tap_without_hid_stays_human() -> None:
     session = DeviceSession()
     session.touch_available = False
     with pytest.raises(Exception) as caught:

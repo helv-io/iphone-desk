@@ -25,7 +25,7 @@ def test_humanize_hides_coredevice_plist() -> None:
     assert shown == REMOTE_CONTROL_FALLBACK_STATUS
     assert "bplist" not in shown
     assert "NSKeyedArchiver" not in shown
-    assert "9021" not in shown
+    assert "iOS 27" in shown
 
 
 def test_humanize_keeps_plain_desk_errors() -> None:

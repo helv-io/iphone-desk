@@ -36,6 +36,8 @@ a = Analysis(
         "iphone_desk.worker",
         "iphone_desk.device",
         "iphone_desk.live_video",
+        "iphone_desk.hevc_decode",
+        "iphone_desk.video_modes",
         "iphone_desk.frames",
         "av",
         "PIL",

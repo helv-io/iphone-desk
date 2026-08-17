@@ -201,7 +201,7 @@ async def test_connect_reveals_then_raises_when_developer_mode_off(
     _install_pymd3(monkeypatch, lockdown=lockdown)
     session = DeviceSession()
     with pytest.raises(DeveloperModeRequiredError) as caught:
-        await session.connect(prefer_hevc=False)
+        await session.connect(video_mode="dvt")
     assert str(caught.value) == DEVELOPER_MODE_OFF_AFTER_REVEAL
     assert amfi.reveal_calls == [lockdown]
     assert amfi.enable_calls == []

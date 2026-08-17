@@ -3,7 +3,14 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay, rolling_fps, shrink_bgra
+from iphone_desk.frames import (
+    LatestSlot,
+    decode_still_to_bgra,
+    prepare_preview_frame,
+    remaining_frame_delay,
+    rolling_fps,
+    shrink_bgra,
+)
 
 
 def test_rolling_fps() -> None:
@@ -57,6 +64,23 @@ def test_shrink_bgra_downscales() -> None:
     assert new_h == 500
     assert new_w == 50
     assert len(out) == new_w * new_h * 4
+
+
+def test_latest_slot_keeps_newest() -> None:
+    slot: LatestSlot[int] = LatestSlot()
+    slot.put(1)
+    slot.put(2)
+    assert slot.take() == 2
+    assert slot.take() is None
+
+
+def test_decode_still_to_bgra() -> None:
+    raw = _png(20, 40)
+    decoded = decode_still_to_bgra(raw, max_height=900)
+    assert decoded is not None
+    width, height, data = decoded
+    assert (width, height) == (20, 40)
+    assert len(data) == 20 * 40 * 4
 
 
 def test_shrink_bgra_keeps_small_frames() -> None:

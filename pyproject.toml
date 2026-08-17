@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iphone-desk"
-version = "0.3.0"
-description = "Windows desktop viewer and touch client for a trusted, Developer Mode iPhone over USB or WiFi."
+version = "0.4.0"
+description = "Windows desktop viewer and touch client for a trusted, Developer Mode iPhone over USB."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -27,6 +27,7 @@ dependencies = [
     "pymobiledevice3>=10.7.0",
     "PySide6>=6.7.0",
     "packaging>=24.0",
+    "pillow>=10.0.0",
     "av>=14.0.0; platform_system != 'Darwin'",
 ]
 

@@ -13,6 +13,12 @@ from PySide6.QtCore import QObject, Signal, Slot
 from iphone_desk.device import ConnectedDevice, DeviceSession, probe_checklist
 from iphone_desk.errors import DeskError, humanize_device_error
 from iphone_desk.hid_actions import TOUCH_CONTACT, TOUCH_RELEASE
+from iphone_desk.video_modes import (
+    HEVC_DECODER_AUTO,
+    VIDEO_MODE_AUTO,
+    normalize_hevc_decoder,
+    normalize_video_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +30,7 @@ class DeviceWorker(QObject):
     frame = Signal(bytes)
     failed = Signal(str)
     disconnected = Signal()
+    mode_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,9 +83,13 @@ class DeviceWorker(QObject):
     def refresh_checklist(self) -> None:
         self._submit(self._refresh_checklist())
 
-    @Slot(bool)
-    def connect_device(self, prefer_hevc: bool) -> None:
-        self._submit(self._connect(prefer_hevc))
+    @Slot(str, str)
+    def connect_device(self, video_mode: str, hevc_decoder: str) -> None:
+        self._submit(self._connect(normalize_video_mode(video_mode), normalize_hevc_decoder(hevc_decoder)))
+
+    @Slot(str, str)
+    def switch_video_mode(self, video_mode: str, hevc_decoder: str) -> None:
+        self._submit(self._switch(normalize_video_mode(video_mode), normalize_hevc_decoder(hevc_decoder)))
 
     @Slot()
     def disconnect_device(self) -> None:
@@ -135,7 +146,7 @@ class DeviceWorker(QObject):
         if status.detail:
             self.status.emit(status.detail)
 
-    async def _connect(self, prefer_hevc: bool) -> None:
+    async def _connect(self, video_mode: str, hevc_decoder: str) -> None:
         if self._session is not None:
             await self._session.close()
             self._session = None
@@ -153,7 +164,8 @@ class DeviceWorker(QObject):
 
         try:
             summary = await session.connect(
-                prefer_hevc=prefer_hevc,
+                video_mode=video_mode or VIDEO_MODE_AUTO,
+                hevc_decoder=hevc_decoder or HEVC_DECODER_AUTO,
                 on_frame=on_frame,
                 on_live_frame=on_live_frame,
                 on_status=on_status,
@@ -169,6 +181,31 @@ class DeviceWorker(QObject):
             return
         self._session = session
         self.connected.emit(summary)
+
+    async def _switch(self, video_mode: str, hevc_decoder: str) -> None:
+        session = self._session
+        if session is None:
+            self.failed.emit("Not connected.")
+            return
+
+        def on_status(message: str) -> None:
+            self.status.emit(message)
+
+        try:
+            await session.switch_picture(video_mode, hevc_decoder=hevc_decoder, on_status=on_status)
+        except DeskError as exc:
+            self.failed.emit(humanize_device_error(exc))
+            if session.summary is not None:
+                self.mode_changed.emit(session.summary)
+            return
+        except Exception as exc:
+            logger.exception("switch picture failed")
+            self.failed.emit(humanize_device_error(exc))
+            if session.summary is not None:
+                self.mode_changed.emit(session.summary)
+            return
+        if session.summary is not None:
+            self.mode_changed.emit(session.summary)
 
     def take_live(self) -> Optional[tuple[int, int, bytes]]:
         with self._live_lock:
