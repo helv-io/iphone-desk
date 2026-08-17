@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import socket
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 from packaging.version import Version
@@ -27,10 +26,22 @@ from iphone_desk.errors import (
     is_remote_control_unsupported,
 )
 from iphone_desk.hid_actions import contact, drag, press_named_button, release, tap
+from iphone_desk.video_modes import (
+    AUTO_FALLBACK_ORDER,
+    VIDEO_MODE_AUTO,
+    VIDEO_MODE_CORE,
+    VIDEO_MODE_DVT,
+    VIDEO_MODE_HEVC,
+    VIDEO_MODE_SCREENSHOTR,
+    normalize_hevc_decoder,
+    normalize_video_mode,
+    video_mode_label,
+)
 
 logger = logging.getLogger(__name__)
 
 FrameCallback = Callable[[bytes], Awaitable[None] | None]
+LiveFrameCallback = Callable[[int, int, bytes], None]
 StatusCallback = Callable[[str], None]
 
 # AMFI action 0 unhides Settings > Privacy & Security > Developer Mode.
@@ -39,7 +50,6 @@ AMFI_REVEAL_ACTION = 0
 AMFI_SERVICE_NAME = "com.apple.amfi.lockdown"
 
 # Parallel DVT stills. One channel is ~4.2 fps; three measured ~7.4 fps on a 15 Pro Max.
-# 10 fps is not reachable with takeScreenshot (needs a ~100ms still).
 DVT_CAPTURE_WORKERS = 3
 
 DEVELOPER_MODE_OFF_AFTER_REVEAL = (
@@ -52,23 +62,13 @@ DEVELOPER_MODE_OFF_IN_SETTINGS = (
 )
 
 TRANSPORT_USB = "USB"
-TRANSPORT_WIFI = "WiFi"
-NO_DEVICE_STATUS = (
-    "No iPhone found over USB or WiFi. Plug in the cable, or wake the unlocked phone "
-    "on the same WiFi so it can advertise."
-)
+NO_DEVICE_STATUS = "No USB iPhone found. Plug in the cable, unlock the phone, and tap Trust if asked."
 
 
 def _load_amfi_service() -> Any:
     from pymobiledevice3.services.amfi import AmfiService
 
     return AmfiService
-
-
-def _load_display_service() -> Any:
-    from pymobiledevice3.remote.core_device.display_service import DisplayService
-
-    return DisplayService
 
 
 def _load_screen_capture() -> Any:
@@ -94,6 +94,12 @@ def _load_dvt_screenshot() -> tuple[Any, Any]:
     from pymobiledevice3.services.dvt.instruments.screenshot import Screenshot
 
     return DvtProvider, Screenshot
+
+
+def _load_screenshotr() -> Any:
+    from pymobiledevice3.services.screenshot import ScreenshotService
+
+    return ScreenshotService
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -150,65 +156,23 @@ def _is_usb(device: Any) -> bool:
     return str(getattr(device, "connection_type", "")).casefold() == "usb"
 
 
-def _is_network(device: Any) -> bool:
-    if bool(getattr(device, "is_network", False)):
-        return True
-    return str(getattr(device, "connection_type", "")).casefold() == "network"
-
-
 def _same_udid(left: str, right: str) -> bool:
     return left.replace("-", "").casefold() == right.replace("-", "").casefold()
 
 
-def usbmux_connection_type(device: Any) -> str:
-    raw = str(getattr(device, "connection_type", "") or "")
-    if raw in {"USB", "Network"}:
-        return raw
-    return "Network" if _is_network(device) else "USB"
-
-
-def transport_label(device: Any) -> str:
-    return TRANSPORT_WIFI if _is_network(device) else TRANSPORT_USB
+def usbmux_connection_type(_device: Any) -> str:
+    """USB-only picker. Network usbmux devices are never accepted."""
+    return "USB"
 
 
 def pick_usbmux_device(devices: list[Any], serial: Optional[str] = None) -> Optional[Any]:
-    """Prefer USB when the same UDID is also visible as a Network device."""
-    matches = list(devices)
+    """Return the first USB usbmux device. Ignore Network entries."""
+    matches = [device for device in devices if _is_usb(device)]
     if serial:
         matches = [device for device in matches if _same_udid(str(device.serial), serial)]
     if not matches:
         return None
-    for device in matches:
-        if _is_usb(device):
-            return device
     return matches[0]
-
-
-async def ensure_wifi_connections(lockdown: Any) -> bool:
-    """Turn on lockdown WiFi connections after Trust. Soft-fail; never blocks USB."""
-    getter = getattr(lockdown, "get_enable_wifi_connections", None)
-    if callable(getter):
-        try:
-            if bool(await _maybe_await(getter())):
-                return True
-        except Exception as exc:
-            logger.warning("get_enable_wifi_connections failed: %s", exc)
-    setter = getattr(lockdown, "set_enable_wifi_connections", None)
-    if not callable(setter):
-        logger.warning("set_enable_wifi_connections is unavailable")
-        return False
-    try:
-        await _maybe_await(setter(True))
-        return True
-    except Exception as exc:
-        logger.warning("set_enable_wifi_connections failed: %s", exc)
-        return False
-
-
-def _pick_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 async def probe_checklist() -> ChecklistStatus:
@@ -232,13 +196,15 @@ async def probe_checklist() -> ChecklistStatus:
             usb_present=False,
             paired=None,
             developer_mode=None,
-            detail="Apple Mobile Device / usbmux is not reachable. Install Apple Mobile Device Support, then replug USB.",
+            detail=(
+                "Apple Mobile Device / usbmux is not reachable. "
+                "Install Apple Mobile Device Support, then replug USB."
+            ),
         )
 
     devices = await list_devices()
     usb = [device for device in devices if _is_usb(device)]
-    wifi = [device for device in devices if _is_network(device)]
-    labels = [f"{device.serial} ({transport_label(device)})" for device in devices]
+    labels = [str(device.serial) for device in usb]
     target = pick_usbmux_device(devices)
     if target is None:
         return ChecklistStatus(
@@ -247,60 +213,51 @@ async def probe_checklist() -> ChecklistStatus:
             paired=None,
             developer_mode=None,
             device_labels=labels,
-            wifi_present=False,
             detail=NO_DEVICE_STATUS,
         )
 
     serial = str(target.serial)
-    how = transport_label(target)
     try:
         lockdown = await create_using_usbmux(
             serial=serial,
             autopair=False,
-            connection_type=usbmux_connection_type(target),
+            connection_type="USB",
         )
     except NotPairedError:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=bool(usb),
+            usb_present=True,
             paired=False,
             developer_mode=None,
             device_labels=labels,
-            wifi_present=bool(wifi),
-            detail=(
-                "The phone is visible but not paired. Unlock it, tap Trust, then Connect. "
-                "First Trust is usually USB."
-            ),
+            detail="The phone is visible but not paired. Unlock it, tap Trust, then Connect.",
         )
     except (PairingDialogResponsePendingError, PasswordRequiredError):
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=bool(usb),
+            usb_present=True,
             paired=False,
             developer_mode=None,
             device_labels=labels,
-            wifi_present=bool(wifi),
             detail="Unlock the iPhone and tap Trust This Computer.",
         )
     except UserDeniedPairingError:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=bool(usb),
+            usb_present=True,
             paired=False,
             developer_mode=None,
             device_labels=labels,
-            wifi_present=bool(wifi),
             detail="Trust was declined on the phone. Unplug, replug, and tap Trust.",
         )
     except Exception as exc:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=bool(usb),
+            usb_present=True,
             paired=None,
             developer_mode=None,
             device_labels=labels,
-            wifi_present=bool(wifi),
-            detail=f"{how} device seen, lockdown failed: {exc}",
+            detail=f"USB device seen, lockdown failed: {exc}",
         )
 
     try:
@@ -308,7 +265,6 @@ async def probe_checklist() -> ChecklistStatus:
         revealed = False
         if paired:
             revealed = await reveal_developer_mode_option(lockdown)
-            await ensure_wifi_connections(lockdown)
         developer_mode: Optional[bool]
         try:
             developer_mode = bool(await lockdown.get_developer_mode_status())
@@ -316,11 +272,7 @@ async def probe_checklist() -> ChecklistStatus:
             developer_mode = None
         name = getattr(lockdown, "display_name", None) or serial
         version = getattr(lockdown, "product_version", "?")
-        if usb and wifi:
-            over = "USB and WiFi"
-        else:
-            over = how
-        detail = f"Found {name} (iOS {version}) over {over}."
+        detail = f"Found {name} (iOS {version}) over USB."
         if developer_mode is False:
             if revealed:
                 detail += (
@@ -331,11 +283,10 @@ async def probe_checklist() -> ChecklistStatus:
                 detail += " Developer Mode is off. Turn it on under Settings > Privacy & Security."
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=bool(usb),
+            usb_present=True,
             paired=paired,
             developer_mode=developer_mode,
             device_labels=labels,
-            wifi_present=bool(wifi),
             detail=detail,
         )
     finally:
@@ -355,21 +306,24 @@ class DeviceSession:
         self._rsd: Any = None
         self._hid: Any = None
         self._buttons: Any = None
-        self._capture: Any = None
         self._dvt: Any = None
         self._dvt_shot: Any = None
         self._dvt_pairs: list[tuple[Any, Any]] = []
         self._dvt_pool: Optional[asyncio.Queue[Any]] = None
-        self._touch_cm: Any = None
-        self._stream_task: Optional[asyncio.Task[None]] = None
+        self._screenshotr: Any = None
         self._shot_task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
         self._hid_lock = asyncio.Lock()
         self.touch_available = True
         self._screencapture_oneshot = False
         self._capture_backend = ""
+        self._picture_mode = ""
+        self._hevc_decoder = "auto"
         self._kb_id: Optional[int] = None
         self._keys: set[int] = set()
+        self._on_frame: Optional[FrameCallback] = None
+        self._on_live_frame: Optional[LiveFrameCallback] = None
+        self._screenshot_fps = 20.0
 
     @property
     def display(self) -> Size:
@@ -381,10 +335,11 @@ class DeviceSession:
         self,
         *,
         serial: Optional[str] = None,
-        prefer_hevc: bool = True,
+        video_mode: str = VIDEO_MODE_AUTO,
+        hevc_decoder: str = "auto",
         screenshot_fps: float = 20.0,
         on_frame: Optional[FrameCallback] = None,
-        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
+        on_live_frame: Optional[LiveFrameCallback] = None,
         on_status: Optional[StatusCallback] = None,
     ) -> ConnectedDevice:
         from pymobiledevice3.exceptions import (
@@ -404,6 +359,12 @@ class DeviceSession:
             if on_status is not None:
                 on_status(message)
 
+        self._on_frame = on_frame
+        self._on_live_frame = on_live_frame
+        self._screenshot_fps = screenshot_fps
+        self._hevc_decoder = normalize_hevc_decoder(hevc_decoder)
+        wanted = normalize_video_mode(video_mode)
+
         try:
             devices = await list_devices()
         except ConnectionFailedToUsbmuxdError as exc:
@@ -414,14 +375,13 @@ class DeviceSession:
         target = pick_usbmux_device(devices, serial)
         if target is None:
             raise NoDeviceError(NO_DEVICE_STATUS)
-        how = transport_label(target)
-        status(f"Pairing over {how}...")
+        status("Pairing over USB...")
 
         try:
             self._lockdown = await create_using_usbmux(
                 serial=str(target.serial),
                 autopair=True,
-                connection_type=usbmux_connection_type(target),
+                connection_type="USB",
                 pair_timeout=90,
             )
         except PairingDialogResponsePendingError as exc:
@@ -438,7 +398,6 @@ class DeviceSession:
         name = str(getattr(lockdown, "display_name", None) or target.serial)
         udid = str(lockdown.udid)
 
-        await ensure_wifi_connections(lockdown)
         revealed = await reveal_developer_mode_option(lockdown)
         try:
             developer_mode = bool(await lockdown.get_developer_mode_status())
@@ -477,13 +436,11 @@ class DeviceSession:
             raw = await info.get_display_info()
         display = parse_display_size(raw)
 
-        mode = await self._start_screen(
-            prefer_hevc=prefer_hevc,
-            screenshot_fps=screenshot_fps,
-            on_frame=on_frame,
-            on_live_frame=on_live_frame,
-            on_status=status,
-        )
+        await self._open_indigo_buttons(status)
+        await self._open_touch_without_stream(status)
+        await self._open_keyboard()
+
+        mode = await self._start_screen(wanted, status)
 
         self.summary = ConnectedDevice(
             udid=udid,
@@ -492,44 +449,84 @@ class DeviceSession:
             display=display,
             mode=mode,
             touch_available=self.touch_available,
-            transport=how,
+            transport=TRANSPORT_USB,
         )
-        status(f"Connected to {name} over {how} (iOS {product_version}) in {mode} mode.")
+        status(f"Connected to {name} over USB (iOS {product_version}) in {video_mode_label(mode)}.")
         return self.summary
 
-    async def _start_screen(
+    async def switch_picture(
         self,
+        video_mode: str,
         *,
-        prefer_hevc: bool,
-        screenshot_fps: float,
-        on_frame: Optional[FrameCallback],
-        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
-        on_status: StatusCallback,
+        hevc_decoder: Optional[str] = None,
+        on_status: Optional[StatusCallback] = None,
     ) -> str:
-        if prefer_hevc:
-            try:
-                await self._start_hevc(on_status=on_status, on_live_frame=on_live_frame)
-                return "hevc"
-            except Exception as exc:
-                logger.warning("Live HEVC failed, using screenshot loop: %s", exc)
-                await self._reset_video_and_hid()
-                if is_remote_control_unsupported(exc):
-                    on_status(
-                        "Live remote-control video was rejected by this iPhone. Using the screenshot loop."
-                    )
-                else:
-                    on_status("Live HEVC was not available. Using the screenshot loop.")
-                await self._start_screenshot_mode(screenshot_fps, on_frame, on_status)
-                return "screenshot"
-        await self._start_screenshot_mode(screenshot_fps, on_frame, on_status)
-        return "screenshot"
+        """Reconnect only the picture path. Trust, tunnel, and HID stay."""
 
-    async def _start_hevc(
-        self,
-        *,
-        on_status: StatusCallback,
-        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
-    ) -> None:
+        def status(message: str) -> None:
+            logger.info(message)
+            if on_status is not None:
+                on_status(message)
+
+        if self._rsd is None:
+            raise DeskError("Not connected.")
+        if hevc_decoder is not None:
+            self._hevc_decoder = normalize_hevc_decoder(hevc_decoder)
+        wanted = normalize_video_mode(video_mode)
+        previous = self._picture_mode or (self.summary.mode if self.summary is not None else "")
+        status(f"Switching picture to {video_mode_label(wanted)}...")
+        await self._stop_picture()
+        try:
+            mode = await self._start_screen(wanted, status)
+        except Exception:
+            if previous and previous != wanted:
+                with contextlib.suppress(Exception):
+                    await self._start_screen(previous, status)
+                    if self.summary is not None:
+                        self.summary = replace(
+                            self.summary, mode=previous, touch_available=self.touch_available
+                        )
+            raise
+        if self.summary is not None:
+            self.summary = replace(self.summary, mode=mode, touch_available=self.touch_available)
+        status(f"Picture is {video_mode_label(mode)}.")
+        return mode
+
+    async def _start_screen(self, video_mode: str, on_status: StatusCallback) -> str:
+        wanted = normalize_video_mode(video_mode)
+        if wanted == VIDEO_MODE_AUTO:
+            last_error: Optional[BaseException] = None
+            for candidate in AUTO_FALLBACK_ORDER:
+                try:
+                    await self._start_named_mode(candidate, on_status)
+                    on_status(f"Auto stuck on {video_mode_label(candidate)}.")
+                    return candidate
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning("Auto candidate %s failed: %s", candidate, exc)
+                    await self._stop_picture()
+                    on_status(f"Auto skipped {video_mode_label(candidate)}: {humanize_device_error(exc)}")
+            last = humanize_device_error(last_error or DeskError("unknown"))
+            raise DeskError(f"Auto found no working picture path. Last error: {last}")
+        await self._start_named_mode(wanted, on_status)
+        return wanted
+
+    async def _start_named_mode(self, mode: str, on_status: StatusCallback) -> None:
+        if mode == VIDEO_MODE_HEVC:
+            await self._start_hevc(on_status=on_status)
+            return
+        if mode == VIDEO_MODE_DVT:
+            await self._start_dvt_stills(on_status)
+            return
+        if mode == VIDEO_MODE_CORE:
+            await self._start_core_stills(on_status)
+            return
+        if mode == VIDEO_MODE_SCREENSHOTR:
+            await self._start_screenshotr(on_status)
+            return
+        raise DeskError(f"Unknown video mode: {mode}")
+
+    async def _start_hevc(self, *, on_status: StatusCallback) -> None:
         import time
         from collections import deque
 
@@ -544,18 +541,26 @@ class DeviceSession:
             nonlocal last_report
             if not first.is_set():
                 first.set()
-            if on_live_frame is not None:
-                on_live_frame(width, height, bgra)
+            if self._on_live_frame is not None:
+                self._on_live_frame(width, height, bgra)
             now = time.perf_counter()
             stamps.append(now)
             if now - last_report >= 1.5:
                 last_report = now
                 on_status(f"Live {rolling_fps(list(stamps)):.1f} fps")
 
-        on_status("Starting live HEVC decode...")
-        pump = LiveHevcPump(self._rsd, on_frame=on_live)
+        on_status(f"Starting HEVC live ({self._hevc_decoder} decode)...")
+        pump = LiveHevcPump(
+            self._rsd,
+            on_frame=on_live,
+            decoder=self._hevc_decoder,
+        )
         await pump.start()
         self._live = pump
+        self._picture_mode = VIDEO_MODE_HEVC
+        self._capture_backend = "hevc"
+        if pump.media_summary:
+            on_status(f"Device media: {pump.media_summary}")
         on_status("Waiting for the first live frame...")
         try:
             await asyncio.wait_for(first.wait(), timeout=12.0)
@@ -564,83 +569,57 @@ class DeviceSession:
             self._live = None
             raise DeskError("Live video started but no picture arrived.") from exc
 
-        from pymobiledevice3.remote.core_device.hid_service import (
-            IndigoHIDService,
-            UniversalHIDServiceService,
-        )
+    async def _start_dvt_stills(self, on_status: StatusCallback) -> None:
+        on_status("Starting DVT screenshots...")
+        if not await self._open_dvt_screenshot():
+            raise DeskError("DVT screenshot did not open.")
+        workers = len(self._dvt_pairs) or 1
+        self._capture_backend = f"dvt x{workers}"
+        self._picture_mode = VIDEO_MODE_DVT
+        on_status(f"Using DVT screenshot ({workers} parallel stills).")
+        self._start_still_loop()
 
+    async def _start_core_stills(self, on_status: StatusCallback) -> None:
+        on_status("Starting Core Device stills...")
+        png = await self._screencapture_once()
+        if not png:
+            raise DeskError("Core Device screen-capture returned an empty frame.")
+        self._screencapture_oneshot = True
+        self._capture_backend = "screencapture"
+        self._picture_mode = VIDEO_MODE_CORE
+        on_status("Using Core Device screen-capture (reconnect each frame).")
+        await self._emit_still(png)
+        self._start_still_loop()
+
+    async def _start_screenshotr(self, on_status: StatusCallback) -> None:
+        on_status("Starting lockdown screenshotr...")
+        if self._lockdown is None:
+            raise DeskError("Lockdown is not connected.")
         try:
-            self._hid = await UniversalHIDServiceService(self._rsd).__aenter__()
-            self._buttons = await IndigoHIDService(self._rsd).__aenter__()
-            self.touch_available = True
-            await self._open_keyboard()
+            service_cls = _load_screenshotr()
+            service = service_cls(lockdown=self._lockdown)
+            raw = await service.take_screenshot()
         except Exception as exc:
-            if is_remote_control_unsupported(exc):
-                self.touch_available = False
-                on_status(TOUCH_BLOCKED_STATUS)
-                return
-            raise
+            raise DeskError(f"Lockdown screenshotr failed: {humanize_device_error(exc)}") from exc
+        if not raw:
+            raise DeskError("Lockdown screenshotr returned an empty frame.")
+        self._screenshotr = service
+        self._capture_backend = "screenshotr"
+        self._picture_mode = VIDEO_MODE_SCREENSHOTR
+        on_status("Using lockdown screenshotr.")
+        await self._emit_still(raw)
+        self._start_still_loop()
 
-    async def _probe_remote_control_video(self) -> None:
-        """Call start_video_stream so a 9021 / iOS 27 reject fails before serve-web."""
-        display_cls = _load_display_service()
-        display = display_cls(self._rsd)
-        await display.__aenter__()
-        try:
-            start = getattr(display, "start_video_stream", None)
-            if not callable(start):
-                return
-            sender_ip = "127.0.0.1"
-            address = getattr(getattr(self._rsd, "service", None), "address", None)
-            if address:
-                sender_ip = str(address[0])
-            answer = await _maybe_await(
-                start(receiver_ip="127.0.0.1", receiver_port=9, sender_ip=sender_ip)
-            )
-            stop = getattr(display, "stop_media_stream", None)
-            if callable(stop) and isinstance(answer, dict):
-                try:
-                    client_session_id = answer["connection"]["options"]["avcMediaStreamOptionClientSessionID"][
-                        "uuid"
-                    ]
-                    await _maybe_await(stop(client_session_id))
-                except Exception:
-                    logger.debug("stop after startmediastream probe failed", exc_info=True)
-        finally:
-            with contextlib.suppress(Exception):
-                await display.__aexit__(None, None, None)
-
-    async def _watch_hevc_task(self, task: asyncio.Task[None], *, timeout: float) -> None:
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
-        if task not in done:
-            return
-        if task.cancelled():
-            raise DeskError("Live HEVC was cancelled before the viewer was ready.")
-        exc = task.exception()
-        if exc is not None:
-            raise exc
-        raise DeskError("Live HEVC ended before the viewer was ready.")
-
-    async def _start_screenshot_mode(
-        self,
-        fps: float,
-        on_frame: Optional[FrameCallback],
-        on_status: StatusCallback,
-    ) -> None:
-        # Screenshot-only: never open touch_session / ScreenStreamServer / startmediastream.
-        on_status("Starting screenshot loop (no live video stream)...")
-        await self._open_indigo_buttons(on_status)
-        await self._open_touch_without_stream(on_status)
-        await self._open_keyboard()
-        if not await self._open_screenshot_capture(on_status):
-            raise DeskError("Could not open screen capture or DVT screenshot.")
-        delay = 1.0 / max(fps, 1.0)
+    def _start_still_loop(self) -> None:
+        delay = 1.0 / max(self._screenshot_fps, 1.0)
         self._shot_task = asyncio.create_task(
-            self._screenshot_loop(delay, on_frame, on_status),
+            self._screenshot_loop(delay),
             name="iphone-desk-screenshots",
         )
 
     async def _open_indigo_buttons(self, on_status: StatusCallback) -> None:
+        if self._buttons is not None:
+            return
         try:
             indigo_cls = _load_indigo_hid()
             self._buttons = await indigo_cls(self._rsd).__aenter__()
@@ -651,6 +630,8 @@ class DeviceSession:
 
     async def _open_touch_without_stream(self, on_status: StatusCallback) -> None:
         """Open Universal HID only. Do not start a media stream to authenticate it."""
+        if self._hid is not None:
+            return
         try:
             hid_cls = _load_universal_hid()
             self._hid = await hid_cls(self._rsd).__aenter__()
@@ -662,7 +643,8 @@ class DeviceSession:
             on_status(TOUCH_BLOCKED_STATUS)
 
     async def _open_keyboard(self) -> None:
-        self._kb_id = None
+        if self._kb_id is not None:
+            return
         self._keys.clear()
         if self._hid is None:
             return
@@ -674,27 +656,6 @@ class DeviceSession:
         except Exception as exc:
             logger.warning("virtual keyboard unavailable: %s", exc)
             self._kb_id = None
-
-    async def _open_screenshot_capture(self, on_status: StatusCallback) -> bool:
-        # DVT first: reusable channel, ~230ms/frame on Helvio's 15 Pro Max.
-        # ScreenCaptureService returns one PNG then the phone closes the XPC
-        # socket. Reconnecting each frame is ~330ms, slower than DVT.
-        if await self._open_dvt_screenshot():
-            workers = len(self._dvt_pairs) or 1
-            self._capture_backend = f"dvt x{workers}"
-            on_status(f"Using DVT screenshot ({workers} parallel stills).")
-            return True
-        try:
-            png = await self._screencapture_once()
-        except Exception as exc:
-            logger.warning("ScreenCaptureService failed: %s", exc)
-            png = b""
-        if png:
-            self._screencapture_oneshot = True
-            self._capture_backend = "screencapture"
-            on_status("Using ScreenCaptureService (reconnect each frame).")
-            return True
-        return False
 
     async def _open_dvt_screenshot(self) -> bool:
         try:
@@ -717,7 +678,7 @@ class DeviceSession:
             logger.warning("DVT screenshot failed: %s", last_exc)
             return False
         try:
-            png = await pairs[0][1].get_screenshot()
+            png = await self._dvt_take(pairs[0][1])
             if not png:
                 raise DeskError("DVT screenshot returned an empty frame.")
         except Exception as exc:
@@ -734,10 +695,30 @@ class DeviceSession:
         for _dvt, shot in pairs:
             pool.put_nowait(shot)
         self._dvt_pool = pool
+        await self._emit_still(png)
         return True
 
+    async def _dvt_take(self, shot: Any) -> bytes:
+        jpeg = getattr(shot, "get_screenshot_jpeg", None) or getattr(shot, "take_screenshot_jpeg", None)
+        if callable(jpeg):
+            with contextlib.suppress(Exception):
+                data = await _maybe_await(jpeg())
+                if isinstance(data, (bytes, bytearray)) and data:
+                    return bytes(data)
+        getter = getattr(shot, "get_screenshot", None)
+        if callable(getter):
+            data = await _maybe_await(getter())
+            if isinstance(data, (bytes, bytearray)) and data:
+                return bytes(data)
+        take = getattr(shot, "take_screenshot", None)
+        if callable(take):
+            data = await _maybe_await(take())
+            if isinstance(data, (bytes, bytearray)) and data:
+                return bytes(data)
+        raise DeskError("DVT screenshot returned an empty frame.")
+
     async def _screencapture_once(self) -> bytes:
-        """One PNG. The device tears down this XPC channel afterward."""
+        """One still. The device tears down this XPC channel afterward."""
         capture_cls = _load_screen_capture()
         capture = await capture_cls(self._rsd).__aenter__()
         try:
@@ -750,58 +731,57 @@ class DeviceSession:
             with contextlib.suppress(Exception):
                 await capture.__aexit__(None, None, None)
 
-    async def _reset_video_and_hid(self) -> None:
-        await self._stop_stream_task()
+    async def _stop_picture(self) -> None:
+        self._stop.set()
+        task = self._shot_task
+        self._shot_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         if self._live is not None:
             with contextlib.suppress(Exception):
                 await self._live.close()
             self._live = None
         self.hevc_url = None
-        for attr in ("_hid", "_buttons", "_touch_cm"):
-            obj = getattr(self, attr)
-            setattr(self, attr, None)
-            if obj is None:
-                continue
+        for dvt, shot in reversed(self._dvt_pairs):
             with contextlib.suppress(Exception):
-                closer = getattr(obj, "__aexit__", None)
-                if closer is not None:
-                    await closer(None, None, None)
+                await shot.__aexit__(None, None, None)
+            with contextlib.suppress(Exception):
+                await dvt.__aexit__(None, None, None)
+        self._dvt_pairs = []
+        self._dvt_pool = None
+        self._dvt_shot = None
+        self._dvt = None
+        if self._screenshotr is not None:
+            closer = getattr(self._screenshotr, "close", None)
+            if callable(closer):
+                with contextlib.suppress(Exception):
+                    await _maybe_await(closer())
+            self._screenshotr = None
+        self._screencapture_oneshot = False
+        self._capture_backend = ""
+        self._picture_mode = ""
+        self._stop = asyncio.Event()
 
-    async def _stop_stream_task(self) -> None:
-        task = self._stream_task
-        self._stream_task = None
-        if task is None:
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-
-    async def _screenshot_loop(
-        self,
-        delay: float,
-        on_frame: Optional[FrameCallback],
-        on_status: Optional[StatusCallback] = None,
-    ) -> None:
+    async def _screenshot_loop(self, delay: float) -> None:
         import time
-
-        from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay
-
         from collections import deque
 
-        from iphone_desk.frames import rolling_fps
+        from iphone_desk.frames import LatestSlot, remaining_frame_delay, rolling_fps
 
-        loop = asyncio.get_running_loop()
         workers = 1
         if self._dvt_pool is not None:
             workers = max(1, self._dvt_pool.qsize())
-        frames_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=workers)
+        latest: LatestSlot[bytes] = LatestSlot()
         stamps: deque[float] = deque(maxlen=12)
         last_report = time.perf_counter()
 
         async def _fill() -> None:
             while not self._stop.is_set():
+                started = time.perf_counter()
                 try:
-                    png = await self._capture_png()
+                    raw = await self._capture_still()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -811,38 +791,32 @@ class DeviceSession:
                         with contextlib.suppress(asyncio.TimeoutError):
                             await asyncio.wait_for(self._stop.wait(), timeout=leftover)
                     continue
-                try:
-                    await asyncio.wait_for(frames_q.put(png), timeout=1.0)
-                except asyncio.TimeoutError:
-                    if self._stop.is_set():
-                        return
+                if raw:
+                    latest.put(raw)
+                leftover = remaining_frame_delay(time.perf_counter() - started, 1.0 / max(delay, 0.01))
+                if leftover > 0:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._stop.wait(), timeout=leftover)
 
         fillers = [asyncio.create_task(_fill(), name=f"iphone-desk-fill-{i}") for i in range(workers)]
         try:
             while not self._stop.is_set():
-                try:
-                    raw = await asyncio.wait_for(frames_q.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    if self._stop.is_set():
-                        return
+                raw = latest.take()
+                if raw is None:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._stop.wait(), timeout=0.02)
                     continue
-                preview = raw
-                if raw:
-                    try:
-                        preview = await loop.run_in_executor(None, prepare_preview_frame, raw)
-                    except Exception as exc:
-                        logger.warning("preview shrink failed: %s", exc)
-                        preview = raw
-                if on_frame is not None and preview:
-                    result = on_frame(preview)
-                    if asyncio.iscoroutine(result):
-                        await result
+                try:
+                    await self._emit_still(raw)
+                except Exception as exc:
+                    logger.warning("still decode failed: %s", exc)
+                    continue
                 now = time.perf_counter()
                 stamps.append(now)
-                if on_status is not None and now - last_report >= 1.5:
+                if now - last_report >= 1.5:
                     fps = rolling_fps(list(stamps))
                     backend = self._capture_backend or "screenshot"
-                    on_status(f"Mirror {fps:.1f} fps ({backend}).")
+                    logger.info("Mirror %.1f fps (%s).", fps, backend)
                     last_report = now
         finally:
             for task in fillers:
@@ -851,35 +825,34 @@ class DeviceSession:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
 
-    async def _ensure_dvt_screenshot(self) -> None:
-        if self._dvt_shot is not None:
-            return
-        dvt_cls, shot_cls = _load_dvt_screenshot()
-        self._dvt = await dvt_cls(self._rsd).__aenter__()
-        self._dvt_shot = await shot_cls(self._dvt).__aenter__()
+    async def _emit_still(self, raw: bytes) -> None:
+        loop = asyncio.get_running_loop()
+        from iphone_desk.frames import decode_still_to_bgra
 
-    async def _capture_png(self) -> bytes:
+        decoded = await loop.run_in_executor(None, decode_still_to_bgra, raw)
+        if decoded is not None and self._on_live_frame is not None:
+            self._on_live_frame(decoded[0], decoded[1], decoded[2])
+            return
+        if self._on_frame is not None and raw:
+            result = self._on_frame(raw)
+            if asyncio.iscoroutine(result):
+                await result
+
+    async def _capture_still(self) -> bytes:
         if self._dvt_pool is not None:
             shot = await self._dvt_pool.get()
             try:
-                return await shot.get_screenshot()
+                return await self._dvt_take(shot)
             finally:
                 self._dvt_pool.put_nowait(shot)
         if self._dvt_shot is not None:
-            return await self._dvt_shot.get_screenshot()
+            return await self._dvt_take(self._dvt_shot)
+        if self._screenshotr is not None:
+            data = await self._screenshotr.take_screenshot()
+            return bytes(data) if data else b""
         if self._screencapture_oneshot:
             return await self._screencapture_once()
-        if self._capture is not None:
-            try:
-                response = await self._capture.capture_screenshot()
-                image = response.get("image")
-                if isinstance(image, (bytes, bytearray)) and image:
-                    return bytes(image)
-            except Exception as exc:
-                logger.warning("ScreenCaptureService frame failed, trying DVT: %s", exc)
-                self._capture = None
-        await self._ensure_dvt_screenshot()
-        return await self._dvt_shot.get_screenshot()
+        raise DeskError("No stills backend is open.")
 
     async def _hid_or_raise(self) -> Any:
         if self._hid is None:
@@ -974,18 +947,8 @@ class DeviceSession:
             raise DeskError(humanize_device_error(exc)) from exc
 
     async def close(self) -> None:
+        await self._stop_picture()
         self._stop.set()
-        for task in (self._shot_task, self._stream_task):
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-        self._shot_task = None
-        self._stream_task = None
-        if self._live is not None:
-            with contextlib.suppress(Exception):
-                await self._live.close()
-            self._live = None
 
         async def _aclose(obj: Any) -> None:
             if obj is None:
@@ -1000,23 +963,10 @@ class DeviceSession:
                 if asyncio.iscoroutine(result):
                     await result
 
-        for dvt, shot in reversed(self._dvt_pairs):
-            with contextlib.suppress(Exception):
-                await _aclose(shot)
-            with contextlib.suppress(Exception):
-                await _aclose(dvt)
-        self._dvt_pairs = []
-        self._dvt_pool = None
-        self._dvt_shot = None
-        self._dvt = None
-        for obj in (self._capture, self._buttons, self._hid):
+        for obj in (self._buttons, self._hid):
             with contextlib.suppress(Exception):
                 await _aclose(obj)
-        self._capture = self._buttons = self._hid = None
-        if self._touch_cm is not None:
-            with contextlib.suppress(Exception):
-                await self._touch_cm.__aexit__(None, None, None)
-            self._touch_cm = None
+        self._buttons = self._hid = None
         if self._tunnel is not None:
             with contextlib.suppress(Exception):
                 await self._tunnel.aclose()
@@ -1029,8 +979,6 @@ class DeviceSession:
         self.summary = None
         self.hevc_url = None
         self.touch_available = True
-        self._screencapture_oneshot = False
-        self._capture_backend = ""
         self._kb_id = None
         self._keys.clear()
         self._stop = asyncio.Event()

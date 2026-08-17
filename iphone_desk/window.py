@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QTimer
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -20,6 +20,7 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -40,6 +41,19 @@ from iphone_desk.keyboard import hid_usages_for_qt_key
 from iphone_desk.coords import Size, fitted_image_rect, phone_corner_radius, widget_to_hid
 from iphone_desk.device import ConnectedDevice
 from iphone_desk.errors import humanize_device_error
+from iphone_desk.video_modes import (
+    HEVC_DECODER_ORDER,
+    SETTINGS_HEVC_DECODER,
+    SETTINGS_VIDEO_MODE,
+    VIDEO_MODE_AUTO,
+    VIDEO_MODE_HEVC,
+    VIDEO_MODE_ORDER,
+    combo_choices,
+    hevc_decoder_label,
+    normalize_hevc_decoder,
+    normalize_video_mode,
+    video_mode_label,
+)
 from iphone_desk.worker import DeviceWorker
 
 
@@ -100,6 +114,20 @@ QPushButton#home:hover { background: #3a4256; }
 QStatusBar {
     background: #0e1016;
     color: #a8b0c2;
+}
+QComboBox {
+    background: #1b1f2a;
+    color: #e8eaf0;
+    border: 1px solid #2c3344;
+    border-radius: 6px;
+    padding: 6px 10px;
+    min-width: 160px;
+}
+QComboBox:hover { border-color: #4b7cff; }
+QComboBox QAbstractItemView {
+    background: #1b1f2a;
+    color: #e8eaf0;
+    selection-background-color: #3b6df0;
 }
 QWidget#phoneStage {
     background: transparent;
@@ -321,6 +349,13 @@ class DeskWindow(QMainWindow):
         self._qt_keys: set[int] = set()
         self._home_siri_fired = False
 
+        self._settings = QSettings()
+        self._mode_busy = False
+        self._active_mode = normalize_video_mode(self._settings.value(SETTINGS_VIDEO_MODE, VIDEO_MODE_AUTO))
+        self._active_decoder = normalize_hevc_decoder(
+            self._settings.value(SETTINGS_HEVC_DECODER, "auto")
+        )
+
         self.worker = DeviceWorker()
         self.worker.status.connect(self._on_status)
         self.worker.checklist.connect(self._on_checklist)
@@ -328,6 +363,7 @@ class DeskWindow(QMainWindow):
         self.worker.frame.connect(self._on_frame)
         self.worker.failed.connect(self._on_failed)
         self.worker.disconnected.connect(self._on_disconnected)
+        self.worker.mode_changed.connect(self._on_mode_changed)
         self.worker.start()
 
         self._stack = QStackedWidget()
@@ -360,6 +396,15 @@ class DeskWindow(QMainWindow):
         self._steps.setMinimumHeight(220)
         self._render_steps(None)
 
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("Video mode")
+        mode_label.setObjectName("subtitle")
+        self._setup_mode = self._make_mode_combo()
+        self._setup_decoder = self._make_decoder_combo()
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self._setup_mode, 1)
+        mode_row.addWidget(self._setup_decoder, 1)
+
         buttons = QHBoxLayout()
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.setObjectName("secondary")
@@ -371,10 +416,91 @@ class DeskWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(self._steps, 1)
+        layout.addLayout(mode_row)
         layout.addLayout(buttons)
         return page
 
-    def _hw_button(self, text: str, action: str, *, object_name: str = "hw", width: int, height: int) -> QPushButton:
+    def _make_mode_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for key, label in combo_choices(VIDEO_MODE_ORDER, {k: video_mode_label(k) for k in VIDEO_MODE_ORDER}):
+            combo.addItem(label, key)
+        index = combo.findData(self._active_mode)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        combo.currentIndexChanged.connect(self._mode_combo_changed)
+        return combo
+
+    def _make_decoder_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        combo.setToolTip("HEVC decoder. Auto tries hardware then software.")
+        for key, label in combo_choices(
+            HEVC_DECODER_ORDER, {k: hevc_decoder_label(k) for k in HEVC_DECODER_ORDER}
+        ):
+            combo.addItem(label, key)
+        index = combo.findData(self._active_decoder)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        combo.currentIndexChanged.connect(self._decoder_combo_changed)
+        self._sync_decoder_visible(combo, self._active_mode)
+        return combo
+
+    def _sync_decoder_visible(self, combo: QComboBox, mode: str) -> None:
+        combo.setVisible(mode in {VIDEO_MODE_HEVC, VIDEO_MODE_AUTO})
+
+    def _selected_mode(self) -> str:
+        return normalize_video_mode(self._setup_mode.currentData(), default=self._active_mode)
+
+    def _selected_decoder(self) -> str:
+        return normalize_hevc_decoder(self._setup_decoder.currentData(), default=self._active_decoder)
+
+    def _set_combos(self, mode: str, decoder: str) -> None:
+        self._mode_busy = True
+        try:
+            for combo in (self._setup_mode, self._live_mode):
+                index = combo.findData(mode)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            for combo in (self._setup_decoder, self._live_decoder):
+                index = combo.findData(decoder)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                self._sync_decoder_visible(combo, mode)
+        finally:
+            self._mode_busy = False
+
+    def _mode_combo_changed(self) -> None:
+        if self._mode_busy:
+            return
+        sender = self.sender()
+        if not isinstance(sender, QComboBox):
+            return
+        mode = normalize_video_mode(sender.currentData())
+        decoder = self._selected_decoder()
+        self._active_mode = mode
+        self._settings.setValue(SETTINGS_VIDEO_MODE, mode)
+        self._set_combos(mode, decoder)
+        if self._stack.currentIndex() == 1:
+            self.worker.switch_video_mode(mode, decoder)
+
+    def _decoder_combo_changed(self) -> None:
+        if self._mode_busy:
+            return
+        sender = self.sender()
+        if not isinstance(sender, QComboBox):
+            return
+        decoder = normalize_hevc_decoder(sender.currentData())
+        self._active_decoder = decoder
+        self._settings.setValue(SETTINGS_HEVC_DECODER, decoder)
+        mode = self._selected_mode()
+        self._set_combos(mode, decoder)
+        if self._stack.currentIndex() == 1 and mode in {VIDEO_MODE_HEVC, VIDEO_MODE_AUTO}:
+            self.worker.switch_video_mode(mode, decoder)
+
+    def _hw_button(
+        self, text: str, action: str, *, object_name: str = "hw", width: int, height: int
+    ) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName(object_name)
         button.setFixedSize(width, height)
@@ -393,11 +519,15 @@ class DeskWindow(QMainWindow):
         self._info = QLabel("Not connected")
         self._info.setObjectName("subtitle")
         self._info.setWordWrap(True)
+        self._live_mode = self._make_mode_combo()
+        self._live_decoder = self._make_decoder_combo()
         self._disconnect_btn = QPushButton("Disconnect")
         self._disconnect_btn.setObjectName("secondary")
         self._disconnect_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._disconnect_btn.clicked.connect(self.worker.disconnect_device)
         top.addWidget(self._info, 1)
+        top.addWidget(self._live_mode)
+        top.addWidget(self._live_decoder)
         top.addWidget(self._disconnect_btn)
 
         self._stage = PhoneStage()
@@ -455,7 +585,6 @@ class DeskWindow(QMainWindow):
                 status.usb_present,
                 status.paired,
                 status.developer_mode,
-                status.wifi_present,
             )
         marks = {"ok": "[ok]", "wait": "[..]", "fail": "[!]"}
         lines = []
@@ -473,28 +602,36 @@ class DeskWindow(QMainWindow):
         self._connect_btn.setEnabled(False)
         self._set_status("Connecting...")
         self._scan.stop()
-        self.worker.connect_device(True)
+        self.worker.connect_device(self._selected_mode(), self._selected_decoder())
 
     def _on_checklist(self, status) -> None:
         self._render_steps(status)
+
+    def _info_text(self, summary: ConnectedDevice) -> str:
+        extra = "" if summary.touch_available else "  taps blocked"
+        return (
+            f"{summary.name}  iOS {summary.product_version}  "
+            f"{summary.display.width}x{summary.display.height}  "
+            f"{video_mode_label(summary.mode)}  {summary.transport}{extra}"
+        )
 
     def _on_connected(self, summary: ConnectedDevice) -> None:
         self._connect_btn.setEnabled(True)
         self._scan.stop()
         self._stage.set_display(summary.display)
-        extra = "" if summary.touch_available else "  taps blocked"
-        self._info.setText(
-            f"{summary.name}  iOS {summary.product_version}  "
-            f"{summary.display.width}x{summary.display.height}  "
-            f"{summary.mode}  {summary.transport}{extra}"
-        )
+        self._active_mode = normalize_video_mode(summary.mode, default=self._selected_mode())
+        self._set_combos(self._active_mode, self._selected_decoder())
+        self._info.setText(self._info_text(summary))
         self._stack.setCurrentIndex(1)
         self._screen.show()
-        if summary.mode == "hevc":
-            self._live_timer.start()
-        else:
-            self._live_timer.stop()
+        self._live_timer.start()
         self._screen.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _on_mode_changed(self, summary: ConnectedDevice) -> None:
+        self._active_mode = normalize_video_mode(summary.mode, default=self._active_mode)
+        self._set_combos(self._active_mode, self._selected_decoder())
+        self._info.setText(self._info_text(summary))
+        self._live_timer.start()
 
     def _paint_live(self) -> None:
         item = self.worker.take_live()

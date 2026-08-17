@@ -37,7 +37,8 @@ TOUCH_BLOCKED_STATUS = (
 )
 
 REMOTE_CONTROL_FALLBACK_STATUS = (
-    "This iPhone rejected live remote-control video. Screenshot mode can still show the screen."
+    "This iPhone rejected live remote-control video (CoreDevice 9021 / iOS 27). "
+    "Pick a stills mode, or Auto, if you want another path."
 )
 
 
