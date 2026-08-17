@@ -1,13 +1,13 @@
-## iPhone Desk 0.2.0
+## iPhone Desk 0.2.1
 
-Windows exe: `iPhoneDesk-0.2.0-windows-x64.exe`
+Windows bundle: `iPhoneDesk-0.2.1-windows-x64.zip`
 
-- Live touch (press / move / long-press / release)
-- Host keyboard
-- Phone chrome: volume left, power right, Home bottom
-- Live HEVC first, stills if the phone rejects the stream
-- Parallel DVT stills when HEVC is unavailable
-- App icon
-- `start.ps1` finds Python 3.12+ without `py -3.12`
+Unzip and run `iPhoneDesk.exe` in the folder.
+
+- Live video is drawn in the phone canvas (no more blank live picture)
+- Touch, keyboard (including Shift+1 and other combos), volume / power / Home / long-press Siri
+- Setup screen auto-scans for a plugged-in iPhone
+- Aspect-locked screen with iPhone-style corners
+- Falls back to stills if the phone will not start live video
 
 See [CHANGELOG.md](https://github.com/helv-io/iphone-desk/blob/main/CHANGELOG.md) for the full list.

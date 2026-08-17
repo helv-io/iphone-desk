@@ -2,6 +2,7 @@ from iphone_desk.coords import (
     HID_MAX,
     fitted_image_rect,
     hid_to_pixel,
+    phone_corner_radius,
     pixel_to_hid,
     scroll_wheel_to_drag,
     widget_to_hid,
@@ -18,6 +19,11 @@ def test_pixel_to_hid_center() -> None:
     x, y = pixel_to_hid(414, 896, 828, 1792)
     assert abs(x - 32768) <= 1
     assert abs(y - 32768) <= 2
+
+
+def test_phone_corner_radius_scales_with_short_side() -> None:
+    assert phone_corner_radius(430, 932) == 430 * 0.128
+    assert phone_corner_radius(0, 100) == 0.0
 
 
 def test_pixel_to_hid_clamps() -> None:

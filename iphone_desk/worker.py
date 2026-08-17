@@ -22,7 +22,6 @@ class DeviceWorker(QObject):
     checklist = Signal(object)
     connected = Signal(object)
     frame = Signal(bytes)
-    hevc_ready = Signal(str)
     failed = Signal(str)
     disconnected = Signal()
 
@@ -34,6 +33,8 @@ class DeviceWorker(QObject):
         self._ready = threading.Event()
         self._touch_pending: Optional[tuple[int, int, int]] = None
         self._touch_flushing = False
+        self._latest_live: Optional[tuple[int, int, bytes]] = None
+        self._live_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -119,6 +120,11 @@ class DeviceWorker(QObject):
     def keys_clear(self) -> None:
         self._submit(self._keys_clear())
 
+    @Slot(object)
+    def keys_replace(self, usages: object) -> None:
+        values = [int(item) for item in (usages or [])]
+        self._submit(self._keys_replace(values))
+
     async def _refresh_checklist(self) -> None:
         try:
             status = await probe_checklist()
@@ -141,10 +147,15 @@ class DeviceWorker(QObject):
         def on_frame(png: bytes) -> None:
             self.frame.emit(png)
 
+        def on_live_frame(width: int, height: int, bgra: bytes) -> None:
+            with self._live_lock:
+                self._latest_live = (int(width), int(height), bgra)
+
         try:
             summary = await session.connect(
                 prefer_hevc=prefer_hevc,
                 on_frame=on_frame,
+                on_live_frame=on_live_frame,
                 on_status=on_status,
             )
         except DeskError as exc:
@@ -158,8 +169,12 @@ class DeviceWorker(QObject):
             return
         self._session = session
         self.connected.emit(summary)
-        if session.hevc_url:
-            self.hevc_ready.emit(session.hevc_url)
+
+    def take_live(self) -> Optional[tuple[int, int, bytes]]:
+        with self._live_lock:
+            item = self._latest_live
+            self._latest_live = None
+            return item
 
     async def _disconnect(self) -> None:
         if self._session is None:
@@ -220,6 +235,15 @@ class DeviceWorker(QObject):
             return
         with contextlib.suppress(Exception):
             await session.keys_clear()
+
+    async def _keys_replace(self, usages: list[int]) -> None:
+        session = self._session
+        if session is None:
+            return
+        try:
+            await session.keys_replace(usages)
+        except Exception as exc:
+            self.status.emit(f"Input failed: {humanize_device_error(exc)}")
 
     async def _call_hid(self, kind: str, *args: Any) -> None:
         session = self._session

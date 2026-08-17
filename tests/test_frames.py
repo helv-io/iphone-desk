@@ -3,7 +3,7 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay, rolling_fps
+from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay, rolling_fps, shrink_bgra
 
 
 def test_rolling_fps() -> None:
@@ -47,3 +47,21 @@ def test_prepare_preview_keeps_small_frames() -> None:
 def test_prepare_preview_returns_original_on_garbage() -> None:
     junk = b"not-an-image"
     assert prepare_preview_frame(junk) == junk
+
+
+def test_shrink_bgra_downscales() -> None:
+    width, height = 200, 2000
+    pixel = bytes([10, 20, 30, 255])
+    data = pixel * (width * height)
+    new_w, new_h, out = shrink_bgra(data, width, height, max_height=500)
+    assert new_h == 500
+    assert new_w == 50
+    assert len(out) == new_w * new_h * 4
+
+
+def test_shrink_bgra_keeps_small_frames() -> None:
+    width, height = 20, 40
+    data = bytes([1, 2, 3, 255]) * (width * height)
+    new_w, new_h, out = shrink_bgra(data, width, height, max_height=500)
+    assert (new_w, new_h) == (width, height)
+    assert out == data

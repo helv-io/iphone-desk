@@ -50,15 +50,17 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install -e ".[dist]"
           .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean packaging/iphone-desk.spec
           $ver = "${{ steps.ver.outputs.name }}"
-          $src = "dist\iPhoneDesk.exe"
-          $dst = "dist\iPhoneDesk-$ver-windows-x64.exe"
-          Copy-Item $src $dst
-          Get-Item $dst | Format-List FullName, Length
+          $src = "dist\iPhoneDesk"
+          if (-not (Test-Path (Join-Path $src "iPhoneDesk.exe"))) { throw "missing onedir exe" }
+          $zip = "dist\iPhoneDesk-$ver-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $src "*") -DestinationPath $zip -Force
+          Get-Item $zip | Format-List FullName, Length
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: iPhoneDesk-${{ steps.ver.outputs.name }}-windows-x64
-          path: dist/iPhoneDesk-*-windows-x64.exe
+          path: dist/iPhoneDesk-*-windows-x64.zip
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
@@ -68,5 +70,5 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body_path: .github/release-notes.md
-          files: dist/iPhoneDesk-*-windows-x64.exe
+          files: dist/iPhoneDesk-*-windows-x64.zip
           fail_on_unmatched_files: true

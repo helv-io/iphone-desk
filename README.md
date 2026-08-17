@@ -11,9 +11,11 @@ Not Apple iPhone Mirroring. Not Continuity. Not a jailbreak. The phone must tap 
 
 ## Install
 
-Grab the latest Windows exe from [Releases](https://github.com/helv-io/iphone-desk/releases/latest):
+Grab the latest Windows zip from [Releases](https://github.com/helv-io/iphone-desk/releases/latest):
 
-`iPhoneDesk-<version>-windows-x64.exe`
+`iPhoneDesk-<version>-windows-x64.zip`
+
+Unzip the folder and run `iPhoneDesk.exe` inside it.
 
 You still need [Apple Mobile Device Support](https://support.apple.com/en-us/HT204144) on the PC:
 
@@ -30,7 +32,7 @@ iTunes is not required.
 3. After Trust, iPhone Desk asks iOS to show **Settings > Privacy & Security > Developer Mode**. Turn that on and restart when iOS asks.
 4. Open iPhone Desk and click **Connect**.
 
-Connect tries live HEVC, then falls back to stills if the phone rejects `startmediastream` (common on iOS 26: "Remote control requires iOS 27").
+Connect tries live video, then falls back to stills if the phone rejects the stream (common on iOS 26: "Remote control requires iOS 27").
 
 ## From source
 

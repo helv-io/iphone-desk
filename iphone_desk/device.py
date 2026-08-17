@@ -267,6 +267,7 @@ class DeviceSession:
     def __init__(self) -> None:
         self.summary: Optional[ConnectedDevice] = None
         self.hevc_url: Optional[str] = None
+        self._live: Any = None
         self._lockdown: Any = None
         self._tunnel: Any = None
         self._rsd: Any = None
@@ -301,6 +302,7 @@ class DeviceSession:
         prefer_hevc: bool = True,
         screenshot_fps: float = 20.0,
         on_frame: Optional[FrameCallback] = None,
+        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
         on_status: Optional[StatusCallback] = None,
     ) -> ConnectedDevice:
         from pymobiledevice3.exceptions import (
@@ -396,6 +398,7 @@ class DeviceSession:
             prefer_hevc=prefer_hevc,
             screenshot_fps=screenshot_fps,
             on_frame=on_frame,
+            on_live_frame=on_live_frame,
             on_status=status,
         )
 
@@ -416,14 +419,15 @@ class DeviceSession:
         prefer_hevc: bool,
         screenshot_fps: float,
         on_frame: Optional[FrameCallback],
+        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
         on_status: StatusCallback,
     ) -> str:
         if prefer_hevc:
             try:
-                await self._start_hevc(on_status=on_status)
+                await self._start_hevc(on_status=on_status, on_live_frame=on_live_frame)
                 return "hevc"
             except Exception as exc:
-                logger.warning("HEVC serve-web failed, using screenshot loop: %s", exc)
+                logger.warning("Live HEVC failed, using screenshot loop: %s", exc)
                 await self._reset_video_and_hid()
                 if is_remote_control_unsupported(exc):
                     on_status(
@@ -436,35 +440,56 @@ class DeviceSession:
         await self._start_screenshot_mode(screenshot_fps, on_frame, on_status)
         return "screenshot"
 
-    async def _start_hevc(self, *, on_status: StatusCallback) -> None:
+    async def _start_hevc(
+        self,
+        *,
+        on_status: StatusCallback,
+        on_live_frame: Optional[Callable[[int, int, bytes], None]] = None,
+    ) -> None:
+        import time
+        from collections import deque
+
+        from iphone_desk.frames import rolling_fps
+        from iphone_desk.live_video import LiveHevcPump
+
+        first = asyncio.Event()
+        stamps: deque[float] = deque(maxlen=24)
+        last_report = time.perf_counter()
+
+        def on_live(width: int, height: int, bgra: bytes) -> None:
+            nonlocal last_report
+            if not first.is_set():
+                first.set()
+            if on_live_frame is not None:
+                on_live_frame(width, height, bgra)
+            now = time.perf_counter()
+            stamps.append(now)
+            if now - last_report >= 1.5:
+                last_report = now
+                on_status(f"Live {rolling_fps(list(stamps)):.1f} fps")
+
+        on_status("Starting live HEVC decode...")
+        pump = LiveHevcPump(self._rsd, on_frame=on_live)
+        await pump.start()
+        self._live = pump
+        on_status("Waiting for the first live frame...")
+        try:
+            await asyncio.wait_for(first.wait(), timeout=12.0)
+        except asyncio.TimeoutError as exc:
+            await pump.close()
+            self._live = None
+            raise DeskError("Live video started but no picture arrived.") from exc
+
         from pymobiledevice3.remote.core_device.hid_service import (
             IndigoHIDService,
             UniversalHIDServiceService,
         )
-        from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
 
-        await self._probe_remote_control_video()
-
-        port = _pick_free_port()
-        server = ScreenStreamServer(
-            self._rsd,
-            bind="127.0.0.1",
-            http_port=port,
-            audio_default_on=False,
-            ltrp_enabled=False,
-        )
-        self._stream_task = asyncio.create_task(server.serve(), name="iphone-desk-serve-web")
-        try:
-            await self._watch_hevc_task(self._stream_task, timeout=2.0)
-        except Exception:
-            await self._stop_stream_task()
-            raise
-        self.hevc_url = f"http://127.0.0.1:{port}/"
-        on_status(f"Live HEVC viewer at {self.hevc_url}")
         try:
             self._hid = await UniversalHIDServiceService(self._rsd).__aenter__()
             self._buttons = await IndigoHIDService(self._rsd).__aenter__()
             self.touch_available = True
+            await self._open_keyboard()
         except Exception as exc:
             if is_remote_control_unsupported(exc):
                 self.touch_available = False
@@ -643,6 +668,10 @@ class DeviceSession:
 
     async def _reset_video_and_hid(self) -> None:
         await self._stop_stream_task()
+        if self._live is not None:
+            with contextlib.suppress(Exception):
+                await self._live.close()
+            self._live = None
         self.hevc_url = None
         for attr in ("_hid", "_buttons", "_touch_cm"):
             obj = getattr(self, attr)
@@ -832,6 +861,10 @@ class DeviceSession:
         self._keys.clear()
         await self._send_keys()
 
+    async def keys_replace(self, usages: list[int]) -> None:
+        self._keys = {int(usage) for usage in usages}
+        await self._send_keys()
+
     async def _send_keys(self) -> None:
         if self._hid is None or self._kb_id is None:
             return
@@ -865,6 +898,10 @@ class DeviceSession:
                     await task
         self._shot_task = None
         self._stream_task = None
+        if self._live is not None:
+            with contextlib.suppress(Exception):
+                await self._live.close()
+            self._live = None
 
         async def _aclose(obj: Any) -> None:
             if obj is None:

@@ -1,6 +1,7 @@
 import pytest
 
 from iphone_desk.hid_actions import (
+    BUTTONS,
     TOUCH_CONTACT,
     TOUCH_RELEASE,
     contact,
@@ -81,3 +82,9 @@ async def test_home_button_down_then_up() -> None:
 def test_tiny_move_is_tap() -> None:
     assert drag_is_tap(100, 100, 120, 110)
     assert not drag_is_tap(100, 100, 2000, 100)
+
+
+def test_siri_is_a_long_power_press() -> None:
+    page, usage, hold = BUTTONS["siri"]
+    assert (page, usage) == BUTTONS["lock"][:2]
+    assert hold > BUTTONS["home"][2]

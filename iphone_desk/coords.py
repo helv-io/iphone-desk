@@ -61,6 +61,14 @@ def hid_to_pixel(hid_x: int, hid_y: int, width: int, height: int) -> tuple[float
     return hid_x * width / HID_MAX, hid_y * height / HID_MAX
 
 
+def phone_corner_radius(width: float, height: float) -> float:
+    """Corner radius for a modern iPhone screen (~55pt on a 430pt-wide phone)."""
+    short = min(width, height)
+    if short <= 0:
+        return 0.0
+    return short * 0.128
+
+
 def fitted_image_rect(widget_w: float, widget_h: float, image_w: float, image_h: float) -> Rect:
     """Letterbox ``image`` inside ``widget`` while keeping aspect ratio."""
     if widget_w <= 0 or widget_h <= 0:

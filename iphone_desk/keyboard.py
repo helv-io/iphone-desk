@@ -53,6 +53,29 @@ QT_KEY_SUPER_L = 0x01000053
 QT_KEY_SUPER_R = 0x01000054
 QT_KEY_SPACE = 0x20
 
+# Shifted US punctuation as Qt.Key_* (these are the Latin-1 code points).
+QT_KEY_EXCLAM = 0x21
+QT_KEY_QUOTEDBL = 0x22
+QT_KEY_NUMBERSIGN = 0x23
+QT_KEY_DOLLAR = 0x24
+QT_KEY_PERCENT = 0x25
+QT_KEY_AMPERSAND = 0x26
+QT_KEY_PARENLEFT = 0x28
+QT_KEY_PARENRIGHT = 0x29
+QT_KEY_ASTERISK = 0x2A
+QT_KEY_PLUS = 0x2B
+QT_KEY_COLON = 0x3A
+QT_KEY_LESS = 0x3C
+QT_KEY_GREATER = 0x3E
+QT_KEY_QUESTION = 0x3F
+QT_KEY_AT = 0x40
+QT_KEY_ASCIICIRCUM = 0x5E
+QT_KEY_UNDERSCORE = 0x5F
+QT_KEY_BRACELEFT = 0x7B
+QT_KEY_BAR = 0x7C
+QT_KEY_BRACERIGHT = 0x7D
+QT_KEY_ASCIITILDE = 0x7E
+
 
 def _letter_map() -> dict[int, int]:
     mapping: dict[int, int] = {}
@@ -103,7 +126,48 @@ QT_TO_HID.update(_letter_map())
 for index, usage in enumerate(range(KEY_F1, KEY_F12 + 1)):
     QT_TO_HID[QT_KEY_F1 + index] = usage
 
+# Qt reports Shift+1 as Key_Exclam, not Key_1. Include Left Shift in the HID set.
+QT_SHIFT_SYMBOLS: dict[int, int] = {
+    QT_KEY_EXCLAM: KEY_1,
+    QT_KEY_AT: KEY_2,
+    QT_KEY_NUMBERSIGN: KEY_3,
+    QT_KEY_DOLLAR: KEY_4,
+    QT_KEY_PERCENT: KEY_5,
+    QT_KEY_ASCIICIRCUM: KEY_6,
+    QT_KEY_AMPERSAND: KEY_7,
+    QT_KEY_ASTERISK: KEY_8,
+    QT_KEY_PARENLEFT: KEY_9,
+    QT_KEY_PARENRIGHT: KEY_0,
+    QT_KEY_UNDERSCORE: KEY_MINUS,
+    QT_KEY_PLUS: KEY_EQUAL,
+    QT_KEY_BRACELEFT: KEY_LBRACKET,
+    QT_KEY_BRACERIGHT: KEY_RBRACKET,
+    QT_KEY_BAR: KEY_BACKSLASH,
+    QT_KEY_COLON: KEY_SEMICOLON,
+    QT_KEY_QUOTEDBL: KEY_APOSTROPHE,
+    QT_KEY_ASCIITILDE: KEY_GRAVE,
+    QT_KEY_LESS: KEY_COMMA,
+    QT_KEY_GREATER: KEY_DOT,
+    QT_KEY_QUESTION: KEY_SLASH,
+}
+
+
+def hid_usages_for_qt_key(key: int) -> tuple[int, ...]:
+    """HID usages that must be down for this Qt key.
+
+    Shifted punctuation includes Left Shift so Shift+1 becomes ``!`` even
+    when Qt reports ``Key_Exclam`` instead of ``Key_1``.
+    """
+    code = int(key)
+    if code in QT_SHIFT_SYMBOLS:
+        return (KEY_LEFT_SHIFT, QT_SHIFT_SYMBOLS[code])
+    usage = QT_TO_HID.get(code)
+    if usage is None:
+        return ()
+    return (usage,)
+
 
 def hid_usage_for_qt_key(key: int) -> int | None:
-    """Return the HID usage for a Qt key, or None if we do not send it."""
-    return QT_TO_HID.get(int(key))
+    """Primary HID usage for a Qt key, or None if unmapped."""
+    usages = hid_usages_for_qt_key(key)
+    return usages[-1] if usages else None

@@ -30,6 +30,33 @@ def remaining_frame_delay(elapsed: float, target_fps: float) -> float:
     return leftover if leftover > 0.0 else 0.0
 
 
+def shrink_bgra(
+    data: bytes,
+    width: int,
+    height: int,
+    *,
+    max_height: int = PREVIEW_MAX_HEIGHT,
+) -> tuple[int, int, bytes]:
+    """Downscale a tight BGRA framebuffer so the window is not painting 3.6 MP live frames."""
+    if width <= 0 or height <= 0:
+        return width, height, data
+    expected = width * height * 4
+    if len(data) < expected:
+        return width, height, data
+    payload = data[:expected]
+    if max_height <= 0 or height <= max_height:
+        return width, height, payload
+    try:
+        from PIL import Image
+    except Exception:
+        return width, height, payload
+    scale = max_height / float(height)
+    new_width = max(1, int(round(width * scale)))
+    image = Image.frombytes("RGBA", (width, height), payload, "raw", "BGRA")
+    image = image.resize((new_width, max_height), Image.Resampling.BILINEAR)
+    return new_width, max_height, image.tobytes("raw", "BGRA")
+
+
 def prepare_preview_frame(
     data: bytes,
     *,

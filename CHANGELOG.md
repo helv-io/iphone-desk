@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-17
+
+### Added
+
+- Phone-shaped viewer: locked aspect ratio and iPhone-style rounded corners
+- Auto-scan for a USB iPhone on the setup screen
+- Long-press Home invokes Siri
+- Taller volume buttons and a longer power button
+
+### Changed
+
+- Live video is decoded on the PC and painted on the phone canvas. The old in-app web page could connect and accept touch while showing a blank picture on Windows.
+- Windows release is a folder bundle (`iPhoneDesk-<version>-windows-x64.zip`). Unzip and run `iPhoneDesk.exe` inside. The old one-file exe was failing to start.
+
+### Fixed
+
+- Shift+1 and other combo keys send the shifted character
+- Keyboard is opened on the live-video path, not only on stills
+- Build script stops a leftover `iPhoneDesk.exe` so the new bundle can overwrite it, then launches the result
+
 ## [0.2.0] - 2026-08-17
 
 ### Added
@@ -40,5 +60,6 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Checklist for Apple Mobile Device Support, Trust, and Developer Mode
 - pymobiledevice3 CoreDevice screen and HID through a userspace RSD tunnel
 
+[0.2.1]: https://github.com/helv-io/iphone-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/helv-io/iphone-desk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/helv-io/iphone-desk/releases/tag/v0.1.0

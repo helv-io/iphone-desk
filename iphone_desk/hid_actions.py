@@ -92,6 +92,7 @@ async def scroll_from_wheel(
 BUTTONS: dict[str, tuple[int, int, float]] = {
     "home": (0x0C, 0x40, 0.05),
     "lock": (0x0C, 0x30, 0.5),
+    "siri": (0x0C, 0x30, 0.85),
     "volume-up": (0x0C, 0xE9, 0.05),
     "volume-down": (0x0C, 0xEA, 0.05),
 }
