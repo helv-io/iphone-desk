@@ -20,7 +20,7 @@ from iphone_desk.errors import (
     DeveloperModeRequiredError,
     DriverMissingError,
     IosVersionError,
-    NoUsbDeviceError,
+    NoDeviceError,
     TOUCH_BLOCKED_STATUS,
     TrustRequiredError,
     humanize_device_error,
@@ -49,6 +49,13 @@ DEVELOPER_MODE_OFF_AFTER_REVEAL = (
 DEVELOPER_MODE_OFF_IN_SETTINGS = (
     "Developer Mode is off. Enable it in Settings > Privacy & Security > Developer Mode, "
     "restart when iOS asks, then Connect."
+)
+
+TRANSPORT_USB = "USB"
+TRANSPORT_WIFI = "WiFi"
+NO_DEVICE_STATUS = (
+    "No iPhone found over USB or WiFi. Plug in the cable, or wake the unlocked phone "
+    "on the same WiFi so it can advertise."
 )
 
 
@@ -134,10 +141,68 @@ class ConnectedDevice:
     display: Size
     mode: str
     touch_available: bool = True
+    transport: str = TRANSPORT_USB
 
 
-def _usb_devices(devices: list[Any]) -> list[Any]:
-    return [device for device in devices if getattr(device, "is_usb", False)]
+def _is_usb(device: Any) -> bool:
+    if bool(getattr(device, "is_usb", False)):
+        return True
+    return str(getattr(device, "connection_type", "")).casefold() == "usb"
+
+
+def _is_network(device: Any) -> bool:
+    if bool(getattr(device, "is_network", False)):
+        return True
+    return str(getattr(device, "connection_type", "")).casefold() == "network"
+
+
+def _same_udid(left: str, right: str) -> bool:
+    return left.replace("-", "").casefold() == right.replace("-", "").casefold()
+
+
+def usbmux_connection_type(device: Any) -> str:
+    raw = str(getattr(device, "connection_type", "") or "")
+    if raw in {"USB", "Network"}:
+        return raw
+    return "Network" if _is_network(device) else "USB"
+
+
+def transport_label(device: Any) -> str:
+    return TRANSPORT_WIFI if _is_network(device) else TRANSPORT_USB
+
+
+def pick_usbmux_device(devices: list[Any], serial: Optional[str] = None) -> Optional[Any]:
+    """Prefer USB when the same UDID is also visible as a Network device."""
+    matches = list(devices)
+    if serial:
+        matches = [device for device in matches if _same_udid(str(device.serial), serial)]
+    if not matches:
+        return None
+    for device in matches:
+        if _is_usb(device):
+            return device
+    return matches[0]
+
+
+async def ensure_wifi_connections(lockdown: Any) -> bool:
+    """Turn on lockdown WiFi connections after Trust. Soft-fail; never blocks USB."""
+    getter = getattr(lockdown, "get_enable_wifi_connections", None)
+    if callable(getter):
+        try:
+            if bool(await _maybe_await(getter())):
+                return True
+        except Exception as exc:
+            logger.warning("get_enable_wifi_connections failed: %s", exc)
+    setter = getattr(lockdown, "set_enable_wifi_connections", None)
+    if not callable(setter):
+        logger.warning("set_enable_wifi_connections is unavailable")
+        return False
+    try:
+        await _maybe_await(setter(True))
+        return True
+    except Exception as exc:
+        logger.warning("set_enable_wifi_connections failed: %s", exc)
+        return False
 
 
 def _pick_free_port() -> int:
@@ -171,60 +236,71 @@ async def probe_checklist() -> ChecklistStatus:
         )
 
     devices = await list_devices()
-    usb = _usb_devices(devices)
-    labels = [f"{device.serial} ({device.connection_type})" for device in usb]
-    if not usb:
+    usb = [device for device in devices if _is_usb(device)]
+    wifi = [device for device in devices if _is_network(device)]
+    labels = [f"{device.serial} ({transport_label(device)})" for device in devices]
+    target = pick_usbmux_device(devices)
+    if target is None:
         return ChecklistStatus(
             apple_mobile_device=True,
             usb_present=False,
             paired=None,
             developer_mode=None,
             device_labels=labels,
-            detail="No USB iPhone yet. Plug the cable in and unlock the phone.",
+            wifi_present=False,
+            detail=NO_DEVICE_STATUS,
         )
 
-    serial = usb[0].serial
+    serial = str(target.serial)
+    how = transport_label(target)
     try:
         lockdown = await create_using_usbmux(
             serial=serial,
             autopair=False,
-            connection_type="USB",
+            connection_type=usbmux_connection_type(target),
         )
     except NotPairedError:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=True,
+            usb_present=bool(usb),
             paired=False,
             developer_mode=None,
             device_labels=labels,
-            detail="The phone is visible but not paired. Unlock it, tap Trust, then Connect.",
+            wifi_present=bool(wifi),
+            detail=(
+                "The phone is visible but not paired. Unlock it, tap Trust, then Connect. "
+                "First Trust is usually USB."
+            ),
         )
     except (PairingDialogResponsePendingError, PasswordRequiredError):
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=True,
+            usb_present=bool(usb),
             paired=False,
             developer_mode=None,
             device_labels=labels,
+            wifi_present=bool(wifi),
             detail="Unlock the iPhone and tap Trust This Computer.",
         )
     except UserDeniedPairingError:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=True,
+            usb_present=bool(usb),
             paired=False,
             developer_mode=None,
             device_labels=labels,
+            wifi_present=bool(wifi),
             detail="Trust was declined on the phone. Unplug, replug, and tap Trust.",
         )
     except Exception as exc:
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=True,
+            usb_present=bool(usb),
             paired=None,
             developer_mode=None,
             device_labels=labels,
-            detail=f"USB device seen, lockdown failed: {exc}",
+            wifi_present=bool(wifi),
+            detail=f"{how} device seen, lockdown failed: {exc}",
         )
 
     try:
@@ -232,6 +308,7 @@ async def probe_checklist() -> ChecklistStatus:
         revealed = False
         if paired:
             revealed = await reveal_developer_mode_option(lockdown)
+            await ensure_wifi_connections(lockdown)
         developer_mode: Optional[bool]
         try:
             developer_mode = bool(await lockdown.get_developer_mode_status())
@@ -239,7 +316,11 @@ async def probe_checklist() -> ChecklistStatus:
             developer_mode = None
         name = getattr(lockdown, "display_name", None) or serial
         version = getattr(lockdown, "product_version", "?")
-        detail = f"Found {name} (iOS {version})."
+        if usb and wifi:
+            over = "USB and WiFi"
+        else:
+            over = how
+        detail = f"Found {name} (iOS {version}) over {over}."
         if developer_mode is False:
             if revealed:
                 detail += (
@@ -250,10 +331,11 @@ async def probe_checklist() -> ChecklistStatus:
                 detail += " Developer Mode is off. Turn it on under Settings > Privacy & Security."
         return ChecklistStatus(
             apple_mobile_device=True,
-            usb_present=True,
+            usb_present=bool(usb),
             paired=paired,
             developer_mode=developer_mode,
             device_labels=labels,
+            wifi_present=bool(wifi),
             detail=detail,
         )
     finally:
@@ -329,17 +411,17 @@ class DeviceSession:
                 "Apple Mobile Device / usbmux is not running. Install Apple Mobile Device Support."
             ) from exc
 
-        usb = _usb_devices(devices)
-        if not usb:
-            raise NoUsbDeviceError("No USB iPhone found. Plug it in and unlock it.")
-        target = serial or usb[0].serial
-        status(f"Pairing with {target} over USB...")
+        target = pick_usbmux_device(devices, serial)
+        if target is None:
+            raise NoDeviceError(NO_DEVICE_STATUS)
+        how = transport_label(target)
+        status(f"Pairing over {how}...")
 
         try:
             self._lockdown = await create_using_usbmux(
-                serial=target,
+                serial=str(target.serial),
                 autopair=True,
-                connection_type="USB",
+                connection_type=usbmux_connection_type(target),
                 pair_timeout=90,
             )
         except PairingDialogResponsePendingError as exc:
@@ -353,9 +435,10 @@ class DeviceSession:
 
         lockdown = self._lockdown
         product_version = str(lockdown.product_version)
-        name = str(getattr(lockdown, "display_name", None) or target)
+        name = str(getattr(lockdown, "display_name", None) or target.serial)
         udid = str(lockdown.udid)
 
+        await ensure_wifi_connections(lockdown)
         revealed = await reveal_developer_mode_option(lockdown)
         try:
             developer_mode = bool(await lockdown.get_developer_mode_status())
@@ -409,8 +492,9 @@ class DeviceSession:
             display=display,
             mode=mode,
             touch_available=self.touch_available,
+            transport=how,
         )
-        status(f"Connected to {name} (iOS {product_version}) in {mode} mode.")
+        status(f"Connected to {name} over {how} (iOS {product_version}) in {mode} mode.")
         return self.summary
 
     async def _start_screen(

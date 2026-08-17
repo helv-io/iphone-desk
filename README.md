@@ -5,7 +5,7 @@
 [![downloads](https://img.shields.io/github/downloads/helv-io/iphone-desk/total)](https://github.com/helv-io/iphone-desk/releases)
 [![license](https://img.shields.io/github/license/helv-io/iphone-desk)](LICENSE)
 
-Windows app that shows a trusted iPhone over USB and sends touch, keys, and hardware buttons.
+Windows app that shows a trusted iPhone over USB or the same WiFi and sends touch, keys, and hardware buttons.
 
 Not Apple iPhone Mirroring. Not Continuity. Not a jailbreak. The phone must tap Trust on this PC, and Developer Mode must be on.
 
@@ -27,10 +27,15 @@ iTunes is not required.
 
 ## First run
 
-1. Plug the iPhone in over USB.
+1. Plug the iPhone in over USB. First Trust is usually USB.
 2. Unlock it and tap **Trust This Computer**.
 3. After Trust, iPhone Desk asks iOS to show **Settings > Privacy & Security > Developer Mode**. Turn that on and restart when iOS asks.
-4. Open iPhone Desk and click **Connect**.
+4. Click **Connect** while the cable is still plugged in. iPhone Desk turns on lockdown WiFi connections. That setting stays on.
+5. Later, on the same WiFi, unlock the phone and click **Connect** without the cable.
+
+The phone must be unlocked, WiFi on, and awake enough to advertise. If it is asleep and not advertising, wake it and try Connect again.
+
+USB still wins when both USB and WiFi are visible for the same phone. Trust and Developer Mode are never skipped on WiFi.
 
 Connect tries live video, then falls back to stills if the phone rejects the stream (common on iOS 26: "Remote control requires iOS 27").
 

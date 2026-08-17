@@ -13,8 +13,11 @@ class DriverMissingError(DeskError):
     pass
 
 
-class NoUsbDeviceError(DeskError):
+class NoDeviceError(DeskError):
     pass
+
+
+NoUsbDeviceError = NoDeviceError
 
 
 class TrustRequiredError(DeskError):
