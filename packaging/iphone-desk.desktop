@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=iPhone Desk
+Comment=View and tap a trusted iPhone over USB
+Exec=iPhoneDesk
+Icon=iphone-desk
+Categories=Utility;
+Terminal=false
+StartupNotify=true
+StartupWMClass=iPhoneDesk

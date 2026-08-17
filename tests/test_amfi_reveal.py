@@ -6,13 +6,14 @@ from typing import Any
 
 import pytest
 
+from iphone_desk.checklist import phone_helper_missing_detail, phone_helper_missing_error
 from iphone_desk.device import (
     DEVELOPER_MODE_OFF_AFTER_REVEAL,
     DeviceSession,
     probe_checklist,
     reveal_developer_mode_option,
 )
-from iphone_desk.errors import DeveloperModeRequiredError
+from iphone_desk.errors import DeveloperModeRequiredError, DriverMissingError
 
 
 class FakeAmfiService:
@@ -216,3 +217,62 @@ def test_device_module_never_enables_or_accepts_developer_mode() -> None:
     assert "enable_developer_mode" not in text
     assert "DEVELOPER_MODE_ENABLE" not in text
     assert "DEVELOPER_MODE_ACCEPT" not in text
+    assert "phone_helper_missing_detail" in text
+    assert "phone_helper_missing_error" in text
+
+
+def _install_pymd3_without_mux(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
+    exceptions = types.ModuleType("pymobiledevice3.exceptions")
+    failed = type("ConnectionFailedToUsbmuxdError", (Exception,), {})
+    setattr(exceptions, "ConnectionFailedToUsbmuxdError", failed)
+    for name in (
+        "NotPairedError",
+        "PairingDialogResponsePendingError",
+        "PasswordRequiredError",
+        "UserDeniedPairingError",
+        "AlreadyMountedError",
+        "DeveloperModeIsNotEnabledError",
+    ):
+        setattr(exceptions, name, type(name, (Exception,), {}))
+
+    async def create_mux() -> Any:
+        raise failed("no mux")
+
+    async def list_devices() -> list[Any]:
+        raise failed("no mux")
+
+    async def create_using_usbmux(**_kwargs: Any) -> Any:
+        raise failed("no mux")
+
+    lockdown_mod = types.ModuleType("pymobiledevice3.lockdown")
+    lockdown_mod.create_using_usbmux = create_using_usbmux  # type: ignore[attr-defined]
+    usbmux_mod = types.ModuleType("pymobiledevice3.usbmux")
+    usbmux_mod.create_mux = create_mux  # type: ignore[attr-defined]
+    usbmux_mod.list_devices = list_devices  # type: ignore[attr-defined]
+    root = types.ModuleType("pymobiledevice3")
+    for name, mod in {
+        "pymobiledevice3": root,
+        "pymobiledevice3.exceptions": exceptions,
+        "pymobiledevice3.lockdown": lockdown_mod,
+        "pymobiledevice3.usbmux": usbmux_mod,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    return failed
+
+
+@pytest.mark.asyncio
+async def test_probe_helper_missing_uses_os_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_pymd3_without_mux(monkeypatch)
+    status = await probe_checklist()
+    assert status.apple_mobile_device is False
+    assert status.detail == phone_helper_missing_detail()
+
+
+@pytest.mark.asyncio
+async def test_connect_helper_missing_uses_os_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_pymd3_without_mux(monkeypatch)
+    session = DeviceSession()
+    with pytest.raises(DriverMissingError) as caught:
+        await session.connect(prefer_hevc=False)
+    assert str(caught.value) == phone_helper_missing_error()
+    await session.close()

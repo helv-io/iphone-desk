@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-17
+
+### Added
+
+- Linux AppImage (`iPhoneDesk-<version>-linux-x86_64.AppImage`) built from the same PyInstaller onedir, wrapped with linuxdeploy
+- One GitHub Release per version tag ships both the Windows zip and the Linux AppImage
+- `packaging/build-appimage.sh` for a local Linux build using `.venv`, matching `packaging/build.ps1` on Windows
+- Setup-screen / `DriverMissingError` copy is OS-aware. On Linux it tells you to install usbmuxd (`sudo apt install usbmuxd` on Debian/Ubuntu)
+
+### Changed
+
+- Tagged releases build Windows and Linux in parallel, then one job publishes both files. Two `action-gh-release` jobs on the same tag would race.
+
 ## [0.3.0] - 2026-08-17
 
 ### Added
@@ -75,6 +88,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Checklist for Apple Mobile Device Support, Trust, and Developer Mode
 - pymobiledevice3 CoreDevice screen and HID through a userspace RSD tunnel
 
+[0.4.0]: https://github.com/helv-io/iphone-desk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/helv-io/iphone-desk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/helv-io/iphone-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/helv-io/iphone-desk/compare/v0.1.0...v0.2.0

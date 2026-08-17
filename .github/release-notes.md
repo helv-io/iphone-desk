@@ -1,8 +1,11 @@
-## iPhone Desk 0.3.0
+## iPhone Desk 0.4.0
 
-Windows bundle: `iPhoneDesk-0.3.0-windows-x64.zip`
+Same GitHub Release, two files:
 
-Unzip and run `iPhoneDesk.exe` in the folder.
+- Windows bundle: `iPhoneDesk-0.4.0-windows-x64.zip` (unzip and run `iPhoneDesk.exe`)
+- Linux AppImage: `iPhoneDesk-0.4.0-linux-x86_64.AppImage` (`chmod +x`, then run it)
+
+On Windows, install Apple Mobile Device Support (`winget install Apple.AppleMobileDeviceSupport`). On Linux, install usbmuxd if the setup screen says the helper is missing (`sudo apt install usbmuxd` on Debian/Ubuntu; Fedora and Arch commands are in the README). The AppImage does not bundle that daemon.
 
 - USB still works when a cable is plugged in
 - After the first USB Trust, Connect works on the same WiFi without the cable

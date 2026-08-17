@@ -1,4 +1,5 @@
 # PyInstaller spec: onedir bundle. A one-file Qt app was failing to start on Windows.
+import sys
 from pathlib import Path
 
 from PyInstaller.building.api import COLLECT, EXE, PYZ
@@ -6,7 +7,55 @@ from PyInstaller.building.build_main import Analysis
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 ROOT = Path(SPECPATH).resolve().parent
-ICON = ROOT / "iphone_desk" / "assets" / "app.ico"
+if sys.platform == "win32":
+    ICON = ROOT / "iphone_desk" / "assets" / "app.ico"
+else:
+    ICON = ROOT / "iphone_desk" / "assets" / "app.png"
+    if not ICON.is_file():
+        ICON = ROOT / "iphone_desk" / "assets" / "app.ico"
+
+
+def _qt_plugin_binaries() -> list[tuple[str, str]]:
+    """Keep xcb/Wayland (and Windows) Qt platform plugins in the onedir."""
+    collected: list[tuple[str, str]] = []
+    try:
+        import PySide6
+    except Exception:
+        return collected
+    root = Path(PySide6.__file__).resolve().parent
+    groups = (
+        "platforms",
+        "xcbglintegrations",
+        "wayland-shell-integration",
+        "wayland-graphics-integration-client",
+        "wayland-decoration-client",
+        "platforminputcontexts",
+        "imageformats",
+        "iconengines",
+        "styles",
+        "tls",
+    )
+    for base in (root / "Qt" / "plugins", root / "plugins"):
+        dest_prefix = "PySide6/Qt/plugins" if "Qt" in base.parts else "PySide6/plugins"
+        for group in groups:
+            folder = base / group
+            if not folder.is_dir():
+                continue
+            dest = f"{dest_prefix}/{group}"
+            for item in folder.iterdir():
+                if item.is_file():
+                    collected.append((str(item), dest))
+    libdir = root / "Qt" / "lib"
+    if libdir.is_dir():
+        for pattern in (
+            "libQt6XcbQpa*",
+            "libQt6WaylandClient*",
+            "libQt6WlShellIntegration*",
+            "libQt6WaylandEglClientHwIntegration*",
+        ):
+            for item in libdir.glob(pattern):
+                collected.append((str(item), "PySide6/Qt/lib"))
+    return collected
 
 datas, binaries, hidden = collect_all("pymobiledevice3")
 try:
@@ -17,6 +66,7 @@ try:
 except Exception:
     pass
 datas += collect_data_files("iphone_desk")
+binaries += _qt_plugin_binaries()
 asset_dir = ROOT / "iphone_desk" / "assets"
 if asset_dir.is_dir():
     datas.append((str(asset_dir), "iphone_desk/assets"))
