@@ -10,7 +10,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, Signal, Slot
 
 from iphone_desk.device import ConnectedDevice, DeviceSession, probe_checklist
-from iphone_desk.errors import DeskError
+from iphone_desk.errors import DeskError, humanize_device_error
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class DeviceWorker(QObject):
         try:
             status = await probe_checklist()
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(humanize_device_error(exc))
             return
         self.checklist.emit(status)
         if status.detail:
@@ -121,12 +121,12 @@ class DeviceWorker(QObject):
             )
         except DeskError as exc:
             await session.close()
-            self.failed.emit(str(exc))
+            self.failed.emit(humanize_device_error(exc))
             return
         except Exception as exc:
             await session.close()
             logger.exception("connect failed")
-            self.failed.emit(str(exc))
+            self.failed.emit(humanize_device_error(exc))
             return
         self._session = session
         self.connected.emit(summary)
@@ -159,7 +159,7 @@ class DeviceWorker(QObject):
             elif kind == "button":
                 await session.press_button(str(args[0]))
         except Exception as exc:
-            self.status.emit(f"Input failed: {exc}")
+            self.status.emit(f"Input failed: {humanize_device_error(exc)}")
 
     def current_summary(self) -> Optional[ConnectedDevice]:
         if self._session is None:

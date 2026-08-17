@@ -21,14 +21,14 @@ It talks to Apple's own developer services through the public Python API of [pym
 - An iPhone on iOS 17 or later
 - USB cable
 - [Apple Mobile Device Support](https://support.apple.com/en-us/HT204144) (install [iTunes for Windows](https://www.apple.com/itunes/) or the Apple Devices app)
-- Developer Mode enabled on the phone
+- Developer Mode enabled on the phone (after Trust, this PC can unhide that Settings row; you still flip the switch and restart)
 
 ## First run
 
 1. Install Apple Mobile Device Support (iTunes or Apple Devices).
 2. Plug the iPhone in over USB.
 3. Unlock the phone and tap **Trust This Computer**.
-4. Enable Developer Mode: **Settings > Privacy & Security > Developer Mode**, then restart when iOS asks.
+4. After Trust, iPhone Desk asks iOS to show Developer Mode. Enable the switch under **Settings > Privacy & Security > Developer Mode**, then restart when iOS asks. The PC does not flip that switch for you.
 5. Start iPhone Desk and click **Connect**.
 
 The window repeats this checklist and can refresh USB / pairing / Developer Mode status before you connect.
@@ -37,11 +37,11 @@ On Connect the app:
 
 1. Lists the USB device through usbmux
 2. Pairs (or reuses an existing pair record) via lockdown
-3. Checks Developer Mode
+3. Asks iOS to show Developer Mode (AMFI reveal only; you still enable the switch), then checks that it is on
 4. Runs `mounter auto-mount` so the Developer Disk Image is present (downloaded and cached, no Xcode required)
 5. Opens pymobiledevice3's no-admin userspace RSD tunnel (`UserspaceRsdTunnel`)
 6. Reads pixel size from `get-display-info`
-7. Starts the screen and HID session
+7. Starts the screen session (screenshots by default; live HEVC only if you asked and the phone allows `startmediastream`)
 
 ## Start the app
 
@@ -82,7 +82,11 @@ HID coordinates are UInt16 values from 0 to 65535, with (0, 0) at the top-left. 
 
 **Preferred:** `developer core-device display serve-web` (HEVC decoded in-browser with WebCodecs), embedded in the window when Qt WebEngine is installed.
 
-**Windows fallback:** HEVC WebCodecs is often flaky or missing on Windows (the Microsoft HEVC Video Extensions package and a WebEngine build that can decode it). If the live picture is black or frozen, click **Screenshot fallback**. That loop uses `developer core-device screen-capture` (and can fall back to `developer dvt screenshot`) at about 8 frames per second. Usable, not 60 fps.
+**Windows fallback:** HEVC WebCodecs is often flaky or missing on Windows (the Microsoft HEVC Video Extensions package and a WebEngine build that can decode it). If the live picture is black or frozen, uncheck live HEVC or click **Screenshot fallback**. That loop uses `developer core-device screen-capture` (and can fall back to `developer dvt screenshot`) at about 8 frames per second. Usable, not 60 fps.
+
+Screenshot-only connect does not call Apple's live remote-control video API (`startmediastream` / `touch_session` / `serve-web`). Some iPhones reject that API with "Remote control requires iOS 27". The screenshot path still shows the screen. Home / Lock / volume use Indigo HID and do not need that stream. Taps may be blocked on those phones because Universal HID is gated on the same video session.
+
+If live HEVC is checked and the phone rejects `startmediastream`, iPhone Desk falls back to screenshots instead of showing a raw CoreDevice error dialog.
 
 `serve-vnc` is macOS-only (VideoToolbox). This app does not depend on it.
 
@@ -102,7 +106,7 @@ pip install -e ".[dev]"
 python -m pytest
 ```
 
-Tests cover pixel-to-HID mapping, letterboxing, scroll-to-drag, display-info parsing, and the tap/drag helpers.
+Tests cover pixel-to-HID mapping, letterboxing, scroll-to-drag, display-info parsing, the tap/drag helpers, the post-Trust AMFI reveal that unhides Developer Mode, and screenshot connect avoiding `startmediastream`.
 
 ## Credits
 

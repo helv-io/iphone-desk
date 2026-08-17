@@ -26,6 +26,7 @@ from iphone_desk import __version__
 from iphone_desk.checklist import WHAT_THIS_IS, format_step_state
 from iphone_desk.coords import Size, widget_to_hid
 from iphone_desk.device import ConnectedDevice
+from iphone_desk.errors import humanize_device_error
 from iphone_desk.hid_actions import drag_is_tap
 from iphone_desk.worker import DeviceWorker
 
@@ -347,9 +348,10 @@ class DeskWindow(QMainWindow):
     def _on_connected(self, summary: ConnectedDevice) -> None:
         self._connect_btn.setEnabled(True)
         self._screen.set_display(summary.display)
+        touch = "touch on" if summary.touch_available else "taps blocked"
         self._info.setText(
             f"{summary.name}  iOS {summary.product_version}  "
-            f"{summary.display.width}x{summary.display.height}  mode={summary.mode}"
+            f"{summary.display.width}x{summary.display.height}  mode={summary.mode}  {touch}"
         )
         self._toolbar.setVisible(True)
         self._fallback_btn.setVisible(summary.mode == "hevc")
@@ -380,8 +382,9 @@ class DeskWindow(QMainWindow):
 
     def _on_failed(self, message: str) -> None:
         self._connect_btn.setEnabled(True)
-        self._set_status(message)
-        QMessageBox.warning(self, "iPhone Desk", message)
+        shown = humanize_device_error(Exception(message)) if message else message
+        self._set_status(shown)
+        QMessageBox.warning(self, "iPhone Desk", shown)
 
     def _on_disconnected(self) -> None:
         self._connect_btn.setEnabled(True)
