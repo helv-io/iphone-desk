@@ -26,7 +26,7 @@ from iphone_desk.errors import (
     humanize_device_error,
     is_remote_control_unsupported,
 )
-from iphone_desk.hid_actions import drag, press_named_button, tap
+from iphone_desk.hid_actions import contact, drag, press_named_button, release, tap
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,10 @@ StatusCallback = Callable[[str], None]
 # Actions 1 (enable) and 2 (post-restart accept) are intentionally unused.
 AMFI_REVEAL_ACTION = 0
 AMFI_SERVICE_NAME = "com.apple.amfi.lockdown"
+
+# Parallel DVT stills. One channel is ~4.2 fps; three measured ~7.4 fps on a 15 Pro Max.
+# 10 fps is not reachable with takeScreenshot (needs a ~100ms still).
+DVT_CAPTURE_WORKERS = 3
 
 DEVELOPER_MODE_OFF_AFTER_REVEAL = (
     "Developer Mode is off. This PC asked iOS to show the toggle. "
@@ -163,7 +167,7 @@ async def probe_checklist() -> ChecklistStatus:
             usb_present=False,
             paired=None,
             developer_mode=None,
-            detail="Apple Mobile Device / usbmux is not reachable. Install iTunes or Apple Devices, then replug USB.",
+            detail="Apple Mobile Device / usbmux is not reachable. Install Apple Mobile Device Support, then replug USB.",
         )
 
     devices = await list_devices()
@@ -271,12 +275,18 @@ class DeviceSession:
         self._capture: Any = None
         self._dvt: Any = None
         self._dvt_shot: Any = None
+        self._dvt_pairs: list[tuple[Any, Any]] = []
+        self._dvt_pool: Optional[asyncio.Queue[Any]] = None
         self._touch_cm: Any = None
         self._stream_task: Optional[asyncio.Task[None]] = None
         self._shot_task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
         self._hid_lock = asyncio.Lock()
         self.touch_available = True
+        self._screencapture_oneshot = False
+        self._capture_backend = ""
+        self._kb_id: Optional[int] = None
+        self._keys: set[int] = set()
 
     @property
     def display(self) -> Size:
@@ -289,7 +299,7 @@ class DeviceSession:
         *,
         serial: Optional[str] = None,
         prefer_hevc: bool = True,
-        screenshot_fps: float = 8.0,
+        screenshot_fps: float = 20.0,
         on_frame: Optional[FrameCallback] = None,
         on_status: Optional[StatusCallback] = None,
     ) -> ConnectedDevice:
@@ -314,7 +324,7 @@ class DeviceSession:
             devices = await list_devices()
         except ConnectionFailedToUsbmuxdError as exc:
             raise DriverMissingError(
-                "Apple Mobile Device / usbmux is not running. Install iTunes or Apple Devices."
+                "Apple Mobile Device / usbmux is not running. Install Apple Mobile Device Support."
             ) from exc
 
         usb = _usb_devices(devices)
@@ -512,11 +522,12 @@ class DeviceSession:
         on_status("Starting screenshot loop (no live video stream)...")
         await self._open_indigo_buttons(on_status)
         await self._open_touch_without_stream(on_status)
+        await self._open_keyboard()
         if not await self._open_screenshot_capture(on_status):
             raise DeskError("Could not open screen capture or DVT screenshot.")
         delay = 1.0 / max(fps, 1.0)
         self._shot_task = asyncio.create_task(
-            self._screenshot_loop(delay, on_frame),
+            self._screenshot_loop(delay, on_frame, on_status),
             name="iphone-desk-screenshots",
         )
 
@@ -541,21 +552,94 @@ class DeviceSession:
             self.touch_available = False
             on_status(TOUCH_BLOCKED_STATUS)
 
-    async def _open_screenshot_capture(self, on_status: StatusCallback) -> bool:
+    async def _open_keyboard(self) -> None:
+        self._kb_id = None
+        self._keys.clear()
+        if self._hid is None:
+            return
+        create = getattr(self._hid, "create_keyboard_service", None)
+        if not callable(create):
+            return
         try:
-            capture_cls = _load_screen_capture()
-            self._capture = await capture_cls(self._rsd).__aenter__()
+            self._kb_id = int(await _maybe_await(create()))
+        except Exception as exc:
+            logger.warning("virtual keyboard unavailable: %s", exc)
+            self._kb_id = None
+
+    async def _open_screenshot_capture(self, on_status: StatusCallback) -> bool:
+        # DVT first: reusable channel, ~230ms/frame on Helvio's 15 Pro Max.
+        # ScreenCaptureService returns one PNG then the phone closes the XPC
+        # socket. Reconnecting each frame is ~330ms, slower than DVT.
+        if await self._open_dvt_screenshot():
+            workers = len(self._dvt_pairs) or 1
+            self._capture_backend = f"dvt x{workers}"
+            on_status(f"Using DVT screenshot ({workers} parallel stills).")
             return True
+        try:
+            png = await self._screencapture_once()
         except Exception as exc:
             logger.warning("ScreenCaptureService failed: %s", exc)
-            self._capture = None
-            on_status("ScreenCaptureService failed. Using DVT screenshot.")
-        try:
-            await self._ensure_dvt_screenshot()
+            png = b""
+        if png:
+            self._screencapture_oneshot = True
+            self._capture_backend = "screencapture"
+            on_status("Using ScreenCaptureService (reconnect each frame).")
             return True
+        return False
+
+    async def _open_dvt_screenshot(self) -> bool:
+        try:
+            dvt_cls, shot_cls = _load_dvt_screenshot()
         except Exception as exc:
             logger.warning("DVT screenshot failed: %s", exc)
             return False
+        pairs: list[tuple[Any, Any]] = []
+        last_exc: Optional[BaseException] = None
+        for index in range(DVT_CAPTURE_WORKERS):
+            try:
+                dvt = await dvt_cls(self._rsd).__aenter__()
+                shot = await shot_cls(dvt).__aenter__()
+                pairs.append((dvt, shot))
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("DVT worker %s failed: %s", index, exc)
+                break
+        if not pairs:
+            logger.warning("DVT screenshot failed: %s", last_exc)
+            return False
+        try:
+            png = await pairs[0][1].get_screenshot()
+            if not png:
+                raise DeskError("DVT screenshot returned an empty frame.")
+        except Exception as exc:
+            logger.warning("DVT screenshot probe failed: %s", exc)
+            for dvt, shot in reversed(pairs):
+                with contextlib.suppress(Exception):
+                    await shot.__aexit__(None, None, None)
+                with contextlib.suppress(Exception):
+                    await dvt.__aexit__(None, None, None)
+            return False
+        self._dvt_pairs = pairs
+        self._dvt, self._dvt_shot = pairs[0]
+        pool: asyncio.Queue[Any] = asyncio.Queue()
+        for _dvt, shot in pairs:
+            pool.put_nowait(shot)
+        self._dvt_pool = pool
+        return True
+
+    async def _screencapture_once(self) -> bytes:
+        """One PNG. The device tears down this XPC channel afterward."""
+        capture_cls = _load_screen_capture()
+        capture = await capture_cls(self._rsd).__aenter__()
+        try:
+            response = await capture.capture_screenshot()
+            image = response.get("image") if isinstance(response, dict) else None
+            if isinstance(image, (bytes, bytearray)) and image:
+                return bytes(image)
+            raise DeskError("ScreenCaptureService returned an empty frame.")
+        finally:
+            with contextlib.suppress(Exception):
+                await capture.__aexit__(None, None, None)
 
     async def _reset_video_and_hid(self) -> None:
         await self._stop_stream_task()
@@ -579,24 +663,80 @@ class DeviceSession:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
 
-    async def _screenshot_loop(self, delay: float, on_frame: Optional[FrameCallback]) -> None:
-        while not self._stop.is_set():
-            try:
-                png = await self._capture_png()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("screenshot failed: %s", exc)
-                await asyncio.sleep(delay)
-                continue
-            if on_frame is not None and png:
-                result = on_frame(png)
-                if asyncio.iscoroutine(result):
-                    await result
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                continue
+    async def _screenshot_loop(
+        self,
+        delay: float,
+        on_frame: Optional[FrameCallback],
+        on_status: Optional[StatusCallback] = None,
+    ) -> None:
+        import time
+
+        from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay
+
+        from collections import deque
+
+        from iphone_desk.frames import rolling_fps
+
+        loop = asyncio.get_running_loop()
+        workers = 1
+        if self._dvt_pool is not None:
+            workers = max(1, self._dvt_pool.qsize())
+        frames_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=workers)
+        stamps: deque[float] = deque(maxlen=12)
+        last_report = time.perf_counter()
+
+        async def _fill() -> None:
+            while not self._stop.is_set():
+                try:
+                    png = await self._capture_png()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("screenshot failed: %s", exc)
+                    leftover = remaining_frame_delay(0.05, 10.0)
+                    if leftover > 0:
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(self._stop.wait(), timeout=leftover)
+                    continue
+                try:
+                    await asyncio.wait_for(frames_q.put(png), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if self._stop.is_set():
+                        return
+
+        fillers = [asyncio.create_task(_fill(), name=f"iphone-desk-fill-{i}") for i in range(workers)]
+        try:
+            while not self._stop.is_set():
+                try:
+                    raw = await asyncio.wait_for(frames_q.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    if self._stop.is_set():
+                        return
+                    continue
+                preview = raw
+                if raw:
+                    try:
+                        preview = await loop.run_in_executor(None, prepare_preview_frame, raw)
+                    except Exception as exc:
+                        logger.warning("preview shrink failed: %s", exc)
+                        preview = raw
+                if on_frame is not None and preview:
+                    result = on_frame(preview)
+                    if asyncio.iscoroutine(result):
+                        await result
+                now = time.perf_counter()
+                stamps.append(now)
+                if on_status is not None and now - last_report >= 1.5:
+                    fps = rolling_fps(list(stamps))
+                    backend = self._capture_backend or "screenshot"
+                    on_status(f"Mirror {fps:.1f} fps ({backend}).")
+                    last_report = now
+        finally:
+            for task in fillers:
+                task.cancel()
+            for task in fillers:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def _ensure_dvt_screenshot(self) -> None:
         if self._dvt_shot is not None:
@@ -606,11 +746,21 @@ class DeviceSession:
         self._dvt_shot = await shot_cls(self._dvt).__aenter__()
 
     async def _capture_png(self) -> bytes:
+        if self._dvt_pool is not None:
+            shot = await self._dvt_pool.get()
+            try:
+                return await shot.get_screenshot()
+            finally:
+                self._dvt_pool.put_nowait(shot)
+        if self._dvt_shot is not None:
+            return await self._dvt_shot.get_screenshot()
+        if self._screencapture_oneshot:
+            return await self._screencapture_once()
         if self._capture is not None:
             try:
                 response = await self._capture.capture_screenshot()
                 image = response.get("image")
-                if isinstance(image, (bytes, bytearray)):
+                if isinstance(image, (bytes, bytearray)) and image:
                     return bytes(image)
             except Exception as exc:
                 logger.warning("ScreenCaptureService frame failed, trying DVT: %s", exc)
@@ -618,12 +768,38 @@ class DeviceSession:
         await self._ensure_dvt_screenshot()
         return await self._dvt_shot.get_screenshot()
 
-    async def tap_hid(self, x: int, y: int) -> None:
+    async def _hid_or_raise(self) -> Any:
         if self._hid is None:
             raise DeskError(TOUCH_BLOCKED_STATUS if not self.touch_available else "Not connected.")
+        return self._hid
+
+    async def tap_hid(self, x: int, y: int) -> None:
+        hid = await self._hid_or_raise()
         try:
             async with self._hid_lock:
-                await tap(self._hid, x, y)
+                await tap(hid, x, y)
+        except Exception as exc:
+            if is_remote_control_unsupported(exc):
+                self.touch_available = False
+                raise DeskError(TOUCH_BLOCKED_STATUS) from exc
+            raise DeskError(humanize_device_error(exc)) from exc
+
+    async def contact_hid(self, x: int, y: int) -> None:
+        hid = await self._hid_or_raise()
+        try:
+            async with self._hid_lock:
+                await contact(hid, x, y)
+        except Exception as exc:
+            if is_remote_control_unsupported(exc):
+                self.touch_available = False
+                raise DeskError(TOUCH_BLOCKED_STATUS) from exc
+            raise DeskError(humanize_device_error(exc)) from exc
+
+    async def release_hid(self, x: int, y: int) -> None:
+        hid = await self._hid_or_raise()
+        try:
+            async with self._hid_lock:
+                await release(hid, x, y)
         except Exception as exc:
             if is_remote_control_unsupported(exc):
                 self.touch_available = False
@@ -640,6 +816,35 @@ class DeviceSession:
             if is_remote_control_unsupported(exc):
                 self.touch_available = False
                 raise DeskError(TOUCH_BLOCKED_STATUS) from exc
+            raise DeskError(humanize_device_error(exc)) from exc
+
+    async def key_down(self, usage: int) -> None:
+        self._keys.add(int(usage))
+        await self._send_keys()
+
+    async def key_up(self, usage: int) -> None:
+        self._keys.discard(int(usage))
+        await self._send_keys()
+
+    async def keys_clear(self) -> None:
+        if not self._keys:
+            return
+        self._keys.clear()
+        await self._send_keys()
+
+    async def _send_keys(self) -> None:
+        if self._hid is None or self._kb_id is None:
+            return
+        send = getattr(self._hid, "send_keyboard", None)
+        if not callable(send):
+            return
+        try:
+            async with self._hid_lock:
+                await _maybe_await(send(self._kb_id, list(self._keys)))
+        except Exception as exc:
+            if is_remote_control_unsupported(exc):
+                logger.warning("keyboard blocked: %s", exc)
+                return
             raise DeskError(humanize_device_error(exc)) from exc
 
     async def press_button(self, name: str) -> None:
@@ -674,10 +879,19 @@ class DeviceSession:
                 if asyncio.iscoroutine(result):
                     await result
 
-        for obj in (self._dvt_shot, self._dvt, self._capture, self._buttons, self._hid):
+        for dvt, shot in reversed(self._dvt_pairs):
+            with contextlib.suppress(Exception):
+                await _aclose(shot)
+            with contextlib.suppress(Exception):
+                await _aclose(dvt)
+        self._dvt_pairs = []
+        self._dvt_pool = None
+        self._dvt_shot = None
+        self._dvt = None
+        for obj in (self._capture, self._buttons, self._hid):
             with contextlib.suppress(Exception):
                 await _aclose(obj)
-        self._dvt_shot = self._dvt = self._capture = self._buttons = self._hid = None
+        self._capture = self._buttons = self._hid = None
         if self._touch_cm is not None:
             with contextlib.suppress(Exception):
                 await self._touch_cm.__aexit__(None, None, None)
@@ -694,4 +908,8 @@ class DeviceSession:
         self.summary = None
         self.hevc_url = None
         self.touch_available = True
+        self._screencapture_oneshot = False
+        self._capture_backend = ""
+        self._kb_id = None
+        self._keys.clear()
         self._stop = asyncio.Event()

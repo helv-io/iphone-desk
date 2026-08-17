@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
-from PySide6.QtGui import QCloseEvent, QImage, QMouseEvent, QPixmap, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl
+from PySide6.QtGui import QCloseEvent, QIcon, QImage, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
-    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -17,17 +16,17 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QTextEdit,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 from iphone_desk import __version__
-from iphone_desk.checklist import WHAT_THIS_IS, format_step_state
+from iphone_desk.assets import app_icon_path
+from iphone_desk.checklist import format_step_state
+from iphone_desk.keyboard import hid_usage_for_qt_key
 from iphone_desk.coords import Size, widget_to_hid
 from iphone_desk.device import ConnectedDevice
 from iphone_desk.errors import humanize_device_error
-from iphone_desk.hid_actions import drag_is_tap
 from iphone_desk.worker import DeviceWorker
 
 try:
@@ -74,13 +73,25 @@ QPushButton#secondary {
     background: #2a3142;
     color: #e8eaf0;
 }
-QCheckBox { color: #d7dce8; spacing: 8px; }
-QToolBar {
-    background: #1b1f2a;
+QPushButton#hw {
+    background: #2a3142;
+    color: #e8eaf0;
     border: none;
-    spacing: 8px;
-    padding: 6px;
+    border-radius: 8px;
+    font-weight: 600;
+    padding: 0;
 }
+QPushButton#hw:hover { background: #3a4256; }
+QPushButton#hw:pressed { background: #1a1f2a; }
+QPushButton#home {
+    background: #2a3142;
+    border: none;
+    border-radius: 14px;
+    min-height: 28px;
+    max-height: 28px;
+    min-width: 128px;
+}
+QPushButton#home:hover { background: #3a4256; }
 QStatusBar {
     background: #0e1016;
     color: #a8b0c2;
@@ -110,6 +121,7 @@ class ScreenView(QLabel):
         self._press_hid: Optional[tuple[int, int]] = None
         self._last_hid: Optional[tuple[int, int]] = None
         self._pixmap: Optional[QPixmap] = None
+        self._gesture = False
 
     def set_display(self, size: Size) -> None:
         self._display = size
@@ -131,7 +143,7 @@ class ScreenView(QLabel):
         scaled = self._pixmap.scaled(
             self.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         self.setPixmap(scaled)
 
@@ -154,23 +166,60 @@ class ScreenView(QLabel):
         self._press = event.position().toPoint()
         self._press_hid = hid
         self._last_hid = hid
+        self._gesture = True
+        self.grabMouse()
+        self._worker.touch_down(hid[0], hid[1])
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         hid = self._hid_at(event.position().toPoint())
         if hid is not None:
             self._last_hid = hid
+        if not self._gesture:
+            return
+        point = hid or self._last_hid
+        if point is None:
+            return
+        self._worker.touch_move(point[0], point[1])
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton or self._press_hid is None:
+        if event.button() != Qt.MouseButton.LeftButton or not self._gesture:
             return
         end = self._hid_at(event.position().toPoint()) or self._last_hid or self._press_hid
-        start = self._press_hid
+        self.cancel_gesture(send_release=False)
+        if end is not None:
+            self._worker.touch_up(end[0], end[1])
+
+    def cancel_gesture(self, *, send_release: bool = True) -> None:
+        if not self._gesture:
+            return
+        hid = self._last_hid or self._press_hid
+        self._gesture = False
         self._press = None
         self._press_hid = None
-        if drag_is_tap(start[0], start[1], end[0], end[1]):
-            self._worker.tap(start[0], start[1])
-        else:
-            self._worker.drag(start[0], start[1], end[0], end[1])
+        if self.mouseGrabber() is self:
+            self.releaseMouse()
+        if send_release and hid is not None:
+            self._worker.touch_up(hid[0], hid[1])
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            return
+        usage = hid_usage_for_qt_key(int(event.key()))
+        if usage is None:
+            event.ignore()
+            return
+        self._worker.key_down(usage)
+        event.accept()
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            return
+        usage = hid_usage_for_qt_key(int(event.key()))
+        if usage is None:
+            event.ignore()
+            return
+        self._worker.key_up(usage)
+        event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         hid = self._hid_at(event.position().toPoint()) or self._last_hid
@@ -187,9 +236,13 @@ class DeskWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"iPhone Desk {__version__}")
+        icon = app_icon_path()
+        if icon is not None:
+            self.setWindowIcon(QIcon(str(icon)))
         self.resize(480, 860)
         self.setMinimumSize(360, 640)
         self.setStyleSheet(STYLE)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.worker = DeviceWorker()
         self.worker.status.connect(self._on_status)
@@ -200,43 +253,15 @@ class DeskWindow(QMainWindow):
         self.worker.failed.connect(self._on_failed)
         self.worker.disconnected.connect(self._on_disconnected)
         self.worker.start()
-        self._reconnect_screenshot = False
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_setup_page())
         self._stack.addWidget(self._build_screen_page())
         self.setCentralWidget(self._stack)
 
-        self._toolbar = QToolBar()
-        self._toolbar.setMovable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._toolbar)
-        self._home_btn = QPushButton("Home")
-        self._lock_btn = QPushButton("Lock")
-        self._vol_up_btn = QPushButton("Vol +")
-        self._vol_down_btn = QPushButton("Vol -")
-        self._fallback_btn = QPushButton("Screenshot fallback")
-        self._disconnect_btn = QPushButton("Disconnect")
-        for button in (
-            self._home_btn,
-            self._lock_btn,
-            self._vol_up_btn,
-            self._vol_down_btn,
-            self._fallback_btn,
-            self._disconnect_btn,
-        ):
-            button.setObjectName("secondary")
-            self._toolbar.addWidget(button)
-        self._home_btn.clicked.connect(lambda: self.worker.button("home"))
-        self._lock_btn.clicked.connect(lambda: self.worker.button("lock"))
-        self._vol_up_btn.clicked.connect(lambda: self.worker.button("volume-up"))
-        self._vol_down_btn.clicked.connect(lambda: self.worker.button("volume-down"))
-        self._fallback_btn.clicked.connect(self._use_screenshot_fallback)
-        self._disconnect_btn.clicked.connect(self.worker.disconnect_device)
-        self._toolbar.setVisible(False)
-
         bar = QStatusBar()
         self.setStatusBar(bar)
-        self._set_status("Ready. Work through the checklist, then Connect.")
+        self._set_status("Ready")
 
         QTimer.singleShot(200, self.worker.refresh_checklist)
 
@@ -249,28 +274,14 @@ class DeskWindow(QMainWindow):
 
         title = QLabel("iPhone Desk")
         title.setObjectName("title")
-        subtitle = QLabel("See and tap your own iPhone from this Windows PC.")
-        subtitle.setObjectName("subtitle")
-        subtitle.setWordWrap(True)
-        blurb = QLabel(WHAT_THIS_IS)
-        blurb.setObjectName("hint")
-        blurb.setWordWrap(True)
 
         self._steps = QTextEdit()
         self._steps.setReadOnly(True)
         self._steps.setMinimumHeight(220)
         self._render_steps(None)
 
-        self._hevc_box = QCheckBox("Try live HEVC (serve-web) first. Fall back to screenshots if the picture is black.")
-        self._hevc_box.setChecked(HAS_WEBENGINE)
-        if not HAS_WEBENGINE:
-            self._hevc_box.setEnabled(False)
-            self._hevc_box.setText(
-                "Live HEVC needs PySide6-QtWebEngine. Screenshot loop will be used (usable FPS, documented fallback)."
-            )
-
         buttons = QHBoxLayout()
-        self._refresh_btn = QPushButton("Refresh status")
+        self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.setObjectName("secondary")
         self._connect_btn = QPushButton("Connect")
         self._refresh_btn.clicked.connect(self.worker.refresh_checklist)
@@ -279,35 +290,77 @@ class DeskWindow(QMainWindow):
         buttons.addWidget(self._connect_btn)
 
         layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addWidget(blurb)
         layout.addWidget(self._steps, 1)
-        layout.addWidget(self._hevc_box)
         layout.addLayout(buttons)
         return page
+
+    def _hw_button(self, text: str, action: str, *, object_name: str = "hw", width: int, height: int) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setFixedSize(width, height)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(lambda: self.worker.button(action))
+        return button
 
     def _build_screen_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("page")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        top = QHBoxLayout()
         self._info = QLabel("Not connected")
         self._info.setObjectName("subtitle")
         self._info.setWordWrap(True)
+        self._disconnect_btn = QPushButton("Disconnect")
+        self._disconnect_btn.setObjectName("secondary")
+        self._disconnect_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._disconnect_btn.clicked.connect(self.worker.disconnect_device)
+        top.addWidget(self._info, 1)
+        top.addWidget(self._disconnect_btn)
+
         self._screen = ScreenView(self.worker)
+        self._screen.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._web: Optional[QWidget] = None
         if HAS_WEBENGINE:
             self._web = QWebEngineView()
             self._web.setMinimumSize(280, 500)
             self._web.hide()
-        layout.addWidget(self._info)
-        layout.addWidget(self._screen, 1)
+        stage = QWidget()
+        stage_layout = QVBoxLayout(stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(0)
+        stage_layout.addWidget(self._screen, 1)
         if self._web is not None:
-            layout.addWidget(self._web, 1)
-        hint = QLabel("Click to tap. Click-drag to drag. Scroll wheel sends a short swipe.")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+            stage_layout.addWidget(self._web, 1)
+
+        self._vol_up_btn = self._hw_button("+", "volume-up", width=28, height=40)
+        self._vol_down_btn = self._hw_button("-", "volume-down", width=28, height=40)
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        left.addStretch(2)
+        left.addWidget(self._vol_up_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        left.addWidget(self._vol_down_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        left.addStretch(5)
+
+        self._power_btn = self._hw_button("\u23fb", "lock", width=28, height=52)
+        right = QVBoxLayout()
+        right.addStretch(2)
+        right.addWidget(self._power_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        right.addStretch(5)
+
+        mid = QHBoxLayout()
+        mid.setSpacing(6)
+        mid.addLayout(left)
+        mid.addWidget(stage, 1)
+        mid.addLayout(right)
+
+        self._home_btn = self._hw_button("", "home", object_name="home", width=140, height=28)
+
+        layout.addLayout(top)
+        layout.addLayout(mid, 1)
+        layout.addWidget(self._home_btn, 0, Qt.AlignmentFlag.AlignHCenter)
         return page
 
     def _render_steps(self, status) -> None:
@@ -321,7 +374,7 @@ class DeskWindow(QMainWindow):
                 status.developer_mode,
             )
         marks = {"ok": "[ok]", "wait": "[..]", "fail": "[!]"}
-        lines = ["First-run checklist", ""]
+        lines = []
         for label, state in rows:
             lines.append(f"{marks.get(state, '[..]')} {label}")
         if status is not None and status.device_labels:
@@ -335,12 +388,7 @@ class DeskWindow(QMainWindow):
     def _connect(self) -> None:
         self._connect_btn.setEnabled(False)
         self._set_status("Connecting...")
-        self.worker.connect_device(self._hevc_box.isChecked())
-
-    def _use_screenshot_fallback(self) -> None:
-        self._set_status("Reconnecting with the screenshot loop...")
-        self._reconnect_screenshot = True
-        self.worker.disconnect_device()
+        self.worker.connect_device(HAS_WEBENGINE)
 
     def _on_checklist(self, status) -> None:
         self._render_steps(status)
@@ -353,20 +401,17 @@ class DeskWindow(QMainWindow):
             f"{summary.name}  iOS {summary.product_version}  "
             f"{summary.display.width}x{summary.display.height}  mode={summary.mode}  {touch}"
         )
-        self._toolbar.setVisible(True)
-        self._fallback_btn.setVisible(summary.mode == "hevc")
         self._stack.setCurrentIndex(1)
         if summary.mode != "hevc":
             self._show_screenshot_surface()
+        self._screen.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_hevc(self, url: str) -> None:
         if self._web is None:
-            self._set_status("HEVC URL is ready but Qt WebEngine is missing. Use screenshot fallback.")
             return
         self._screen.hide()
         self._web.show()
         self._web.load(QUrl(url))
-        self._set_status(f"Live HEVC at {url}. If the picture stays black, use Screenshot fallback.")
 
     def _show_screenshot_surface(self) -> None:
         if self._web is not None:
@@ -386,19 +431,43 @@ class DeskWindow(QMainWindow):
         self._set_status(shown)
         QMessageBox.warning(self, "iPhone Desk", shown)
 
+    def _forward_key(self, event: QKeyEvent, down: bool) -> bool:
+        if self._stack.currentIndex() != 1 or event.isAutoRepeat():
+            return False
+        usage = hid_usage_for_qt_key(int(event.key()))
+        if usage is None:
+            return False
+        if down:
+            self.worker.key_down(usage)
+        else:
+            self.worker.key_up(usage)
+        event.accept()
+        return True
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if not self._forward_key(event, True):
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if not self._forward_key(event, False):
+            super().keyReleaseEvent(event)
+
+    def changeEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            self._screen.cancel_gesture()
+            self.worker.keys_clear()
+
     def _on_disconnected(self) -> None:
+        self._screen.cancel_gesture()
         self._connect_btn.setEnabled(True)
-        self._toolbar.setVisible(False)
         self._stack.setCurrentIndex(0)
-        if self._reconnect_screenshot:
-            self._reconnect_screenshot = False
-            self.worker.connect_device(False)
-            return
         self.worker.refresh_checklist()
 
     def _set_status(self, message: str) -> None:
         self.statusBar().showMessage(message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._screen.cancel_gesture()
         self.worker.stop()
         super().closeEvent(event)

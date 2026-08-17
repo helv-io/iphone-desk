@@ -3,9 +3,11 @@ import pytest
 from iphone_desk.hid_actions import (
     TOUCH_CONTACT,
     TOUCH_RELEASE,
+    contact,
     drag,
     drag_is_tap,
     press_named_button,
+    release,
     tap,
 )
 
@@ -24,6 +26,19 @@ class FakeButtons:
 
     async def send_button(self, usage_page: int, usage_code: int, state: int) -> None:
         self.calls.append((usage_page, usage_code, state))
+
+
+@pytest.mark.asyncio
+async def test_live_contact_and_release_are_separate() -> None:
+    hid = FakeTouch()
+    await contact(hid, 10, 20)
+    await contact(hid, 30, 40)
+    await release(hid, 30, 40)
+    assert hid.calls == [
+        (TOUCH_CONTACT, 10, 20),
+        (TOUCH_CONTACT, 30, 40),
+        (TOUCH_RELEASE, 30, 40),
+    ]
 
 
 @pytest.mark.asyncio

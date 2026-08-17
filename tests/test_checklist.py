@@ -1,4 +1,4 @@
-from iphone_desk.checklist import CHECKLIST_STEPS, WHAT_THIS_IS, ChecklistStatus, format_step_state
+from iphone_desk.checklist import CHECKLIST_STEPS, ChecklistStatus, format_step_state
 
 
 def test_checklist_mentions_trust_and_developer_mode() -> None:
@@ -7,14 +7,6 @@ def test_checklist_mentions_trust_and_developer_mode() -> None:
     assert "Developer Mode" in text
     assert "USB" in text
     assert "Apple Mobile Device" in text
-    assert "this PC asks iOS to show Developer Mode" in text
-    assert "Settings > Privacy & Security" in text
-
-
-def test_what_this_is_is_not_apple_mirroring() -> None:
-    assert "not Apple iPhone Mirroring" in WHAT_THIS_IS
-    assert "not Continuity" in WHAT_THIS_IS
-    assert "jailbreak" in WHAT_THIS_IS
 
 
 def test_ready_requires_driver_and_usb() -> None:

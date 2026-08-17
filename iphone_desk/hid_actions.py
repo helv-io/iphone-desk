@@ -25,6 +25,18 @@ def normalize_point(x: int, y: int) -> tuple[int, int]:
     return clamp_hid(x), clamp_hid(y)
 
 
+async def contact(service: TouchScreen, x: int, y: int) -> None:
+    """Finger down or finger moved. Same HID state as a live drag sample."""
+    x, y = normalize_point(x, y)
+    await service.send_touchscreen(TOUCH_CONTACT, x, y)
+
+
+async def release(service: TouchScreen, x: int, y: int) -> None:
+    """Finger up at ``(x, y)``."""
+    x, y = normalize_point(x, y)
+    await service.send_touchscreen(TOUCH_RELEASE, x, y)
+
+
 async def tap(service: TouchScreen, x: int, y: int, *, hold: float = 0.05) -> None:
     """One CONTACT then RELEASE at the same HID point."""
     x, y = normalize_point(x, y)
@@ -117,10 +129,12 @@ __all__ = [
     "HID_MAX",
     "TOUCH_CONTACT",
     "TOUCH_RELEASE",
+    "contact",
     "drag",
     "drag_is_tap",
     "normalize_point",
     "press_named_button",
+    "release",
     "scroll_from_wheel",
     "tap",
 ]

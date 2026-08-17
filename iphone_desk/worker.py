@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from typing import Any, Optional
@@ -11,6 +12,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from iphone_desk.device import ConnectedDevice, DeviceSession, probe_checklist
 from iphone_desk.errors import DeskError, humanize_device_error
+from iphone_desk.hid_actions import TOUCH_CONTACT, TOUCH_RELEASE
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,8 @@ class DeviceWorker(QObject):
         self._thread: Optional[threading.Thread] = None
         self._session: Optional[DeviceSession] = None
         self._ready = threading.Event()
+        self._touch_pending: Optional[tuple[int, int, int]] = None
+        self._touch_flushing = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -83,6 +87,18 @@ class DeviceWorker(QObject):
     def tap(self, x: int, y: int) -> None:
         self._submit(self._call_hid("tap", x, y))
 
+    @Slot(int, int)
+    def touch_down(self, x: int, y: int) -> None:
+        self._queue_touch(TOUCH_CONTACT, x, y)
+
+    @Slot(int, int)
+    def touch_move(self, x: int, y: int) -> None:
+        self._queue_touch(TOUCH_CONTACT, x, y)
+
+    @Slot(int, int)
+    def touch_up(self, x: int, y: int) -> None:
+        self._queue_touch(TOUCH_RELEASE, x, y)
+
     @Slot(int, int, int, int)
     def drag(self, x1: int, y1: int, x2: int, y2: int) -> None:
         self._submit(self._call_hid("drag", x1, y1, x2, y2))
@@ -90,6 +106,18 @@ class DeviceWorker(QObject):
     @Slot(str)
     def button(self, name: str) -> None:
         self._submit(self._call_hid("button", name))
+
+    @Slot(int)
+    def key_down(self, usage: int) -> None:
+        self._submit(self._key(True, int(usage)))
+
+    @Slot(int)
+    def key_up(self, usage: int) -> None:
+        self._submit(self._key(False, int(usage)))
+
+    @Slot()
+    def keys_clear(self) -> None:
+        self._submit(self._keys_clear())
 
     async def _refresh_checklist(self) -> None:
         try:
@@ -146,6 +174,52 @@ class DeviceWorker(QObject):
         if self._session is not None:
             await self._session.close()
             self._session = None
+
+    def _queue_touch(self, state: int, x: int, y: int) -> None:
+        """Keep only the latest sample so USB lag cannot queue a stale path."""
+        self._touch_pending = (state, int(x), int(y))
+        if not self._touch_flushing:
+            self._submit(self._flush_touch())
+
+    async def _flush_touch(self) -> None:
+        self._touch_flushing = True
+        try:
+            while self._touch_pending is not None:
+                state, x, y = self._touch_pending
+                self._touch_pending = None
+                session = self._session
+                if session is None:
+                    continue
+                try:
+                    if state == TOUCH_RELEASE:
+                        await session.release_hid(x, y)
+                    else:
+                        await session.contact_hid(x, y)
+                except Exception as exc:
+                    self.status.emit(f"Input failed: {humanize_device_error(exc)}")
+        finally:
+            self._touch_flushing = False
+            if self._touch_pending is not None:
+                self._submit(self._flush_touch())
+
+    async def _key(self, down: bool, usage: int) -> None:
+        session = self._session
+        if session is None:
+            return
+        try:
+            if down:
+                await session.key_down(usage)
+            else:
+                await session.key_up(usage)
+        except Exception as exc:
+            self.status.emit(f"Input failed: {humanize_device_error(exc)}")
+
+    async def _keys_clear(self) -> None:
+        session = self._session
+        if session is None:
+            return
+        with contextlib.suppress(Exception):
+            await session.keys_clear()
 
     async def _call_hid(self, kind: str, *args: Any) -> None:
         session = self._session

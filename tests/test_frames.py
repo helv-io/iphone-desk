@@ -1,0 +1,49 @@
+from io import BytesIO
+
+import pytest
+from PIL import Image
+
+from iphone_desk.frames import prepare_preview_frame, remaining_frame_delay, rolling_fps
+
+
+def test_rolling_fps() -> None:
+    assert rolling_fps([]) == 0.0
+    assert rolling_fps([1.0]) == 0.0
+    assert rolling_fps([1.0, 1.2, 1.4, 1.5]) == pytest.approx(6.0)
+
+
+def test_remaining_delay_is_zero_when_capture_already_used_budget() -> None:
+    assert remaining_frame_delay(0.2, 10.0) == 0.0
+    assert remaining_frame_delay(0.05, 10.0) == 0.05
+
+
+def test_remaining_delay_rejects_non_positive_fps() -> None:
+    assert remaining_frame_delay(0.01, 0.0) == 0.0
+    assert remaining_frame_delay(0.01, -8.0) == 0.0
+
+
+def _png(width: int, height: int) -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (12, 34, 56)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_prepare_preview_downscales_and_jpeg_encodes() -> None:
+    raw = _png(1290, 2796)
+    out = prepare_preview_frame(raw, max_height=900)
+    preview = Image.open(BytesIO(out))
+    assert preview.format == "JPEG"
+    assert preview.height == 900
+    assert preview.width == 415
+
+
+def test_prepare_preview_keeps_small_frames() -> None:
+    raw = _png(200, 400)
+    out = prepare_preview_frame(raw, max_height=900)
+    preview = Image.open(BytesIO(out))
+    assert preview.size == (200, 400)
+
+
+def test_prepare_preview_returns_original_on_garbage() -> None:
+    junk = b"not-an-image"
+    assert prepare_preview_frame(junk) == junk

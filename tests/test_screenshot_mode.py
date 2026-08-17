@@ -69,12 +69,14 @@ async def test_screenshot_connect_does_not_open_touch_session(
         touch_calls.append(rsd)
         raise AssertionError("touch_session must not be used in screenshot mode")
 
-    monkeypatch.setattr("iphone_desk.device._load_screen_capture", lambda: capture)
+    dvt = FakeService("dvt")
+    shot = FakeService("shot")
+    monkeypatch.setattr("iphone_desk.device._load_dvt_screenshot", lambda: (dvt, shot))
     monkeypatch.setattr("iphone_desk.device._load_indigo_hid", lambda: indigo)
     monkeypatch.setattr("iphone_desk.device._load_universal_hid", lambda: hid)
     monkeypatch.setattr(
-        "iphone_desk.device._load_dvt_screenshot",
-        lambda: (_ for _ in ()).throw(AssertionError("DVT should not be needed")),
+        "iphone_desk.device._load_screen_capture",
+        lambda: (_ for _ in ()).throw(AssertionError("ScreenCapture is fallback only")),
     )
 
     statuses: list[str] = []
@@ -83,7 +85,8 @@ async def test_screenshot_connect_does_not_open_touch_session(
     await session._start_screenshot_mode(8.0, None, statuses.append)
 
     assert touch_calls == []
-    assert "capture" in FakeService.opened
+    assert "dvt" in FakeService.opened
+    assert "shot" in FakeService.opened
     assert "indigo" in FakeService.opened
     assert "hid" in FakeService.opened
     assert session._shot_task is not None
@@ -146,6 +149,46 @@ async def test_screenshot_only_skips_hevc_probe(monkeypatch: pytest.MonkeyPatch)
     assert mode == "screenshot"
     assert probes == 0
     assert started == ["screenshot"]
+
+
+@pytest.mark.asyncio
+async def test_dvt_failure_uses_oneshot_screencapture(monkeypatch: pytest.MonkeyPatch) -> None:
+    class OneShotCapture:
+        opened = 0
+        closed = 0
+
+        def __call__(self, rsd: Any) -> OneShotCapture:
+            return self
+
+        async def __aenter__(self) -> OneShotCapture:
+            type(self).opened += 1
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            type(self).closed += 1
+
+        async def capture_screenshot(self) -> dict[str, bytes]:
+            return {"image": b"\x89PNG"}
+
+    monkeypatch.setattr(
+        "iphone_desk.device._load_dvt_screenshot",
+        lambda: (_ for _ in ()).throw(RuntimeError("dvt down")),
+    )
+    monkeypatch.setattr("iphone_desk.device._load_screen_capture", lambda: OneShotCapture())
+
+    session = DeviceSession()
+    session._rsd = object()
+    statuses: list[str] = []
+    assert await session._open_screenshot_capture(statuses.append) is True
+    assert session._screencapture_oneshot is True
+    assert session._capture_backend == "screencapture"
+    assert OneShotCapture.opened == 1
+    assert OneShotCapture.closed == 1
+    frame = await session._capture_png()
+    assert frame.startswith(b"\x89PNG")
+    assert OneShotCapture.opened == 2
+    assert OneShotCapture.closed == 2
+    assert any("ScreenCapture" in item for item in statuses)
 
 
 @pytest.mark.asyncio

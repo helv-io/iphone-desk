@@ -7,19 +7,11 @@ from typing import Optional
 
 
 CHECKLIST_STEPS: tuple[str, ...] = (
-    "Install Apple Mobile Device Support (iTunes or the Apple Devices app) so Windows can talk to the phone over USB.",
-    "Plug the iPhone in with a USB cable. USB is the supported path for 0.1.0. Wi-Fi is a later stretch goal.",
-    "Unlock the iPhone and tap Trust This Computer if iOS asks.",
-    "After Trust, this PC asks iOS to show Developer Mode. Enable the switch under Settings > Privacy & Security > Developer Mode, then restart when iOS asks.",
-    "Click Connect. iPhone Desk will pair if needed, mount Apple's Developer Disk Image, and open a userspace tunnel.",
-)
-
-
-WHAT_THIS_IS = (
-    "iPhone Desk shows a phone you own and have already trusted on this PC. "
-    "It uses Apple's public developer services through pymobiledevice3. "
-    "It is not Apple iPhone Mirroring, not Continuity, and not an Apple ID pairing app. "
-    "It does not jailbreak the phone, does not bypass the passcode, and will not control a device that has not tapped Trust."
+    "Apple Mobile Device Support",
+    "USB",
+    "Trust",
+    "Developer Mode",
+    "Connect",
 )
 
 
