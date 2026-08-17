@@ -20,7 +20,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio packaging
+          pip install pytest pytest-asyncio packaging pillow
           pip install -e . --no-deps
       - name: Test
         run: python -m pytest
