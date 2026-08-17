@@ -1,13 +1,13 @@
-## iPhone Desk 0.2.1
+## iPhone Desk 0.3.0
 
-Windows bundle: `iPhoneDesk-0.2.1-windows-x64.zip`
+Windows bundle: `iPhoneDesk-0.3.0-windows-x64.zip`
 
 Unzip and run `iPhoneDesk.exe` in the folder.
 
-- Live video is drawn in the phone canvas (no more blank live picture)
-- Touch, keyboard (including Shift+1 and other combos), volume / power / Home / long-press Siri
-- Setup screen auto-scans for a plugged-in iPhone
-- Aspect-locked screen with iPhone-style corners
+- USB still works when a cable is plugged in
+- After the first USB Trust, Connect works on the same WiFi without the cable
+- Checklist shows USB, WiFi, or both
+- Trust, Developer Mode, and iOS 17+ checks stay in place
 - Falls back to stills if the phone will not start live video
 
 See [CHANGELOG.md](https://github.com/helv-io/iphone-desk/blob/main/CHANGELOG.md) for the full list.

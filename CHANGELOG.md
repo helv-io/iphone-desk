@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-17
+
+### Added
+
+- Connect over WiFi after the first USB Trust. usbmux Network devices are accepted when no cable is present
+- After Trust, lockdown WiFi connections are turned on (`EnableWifiConnections`) so later Connect can find the phone on the LAN
+- Checklist transport row shows USB, WiFi, or both. Auto-scan picks up a network iPhone
+- Status copy says which transport is in use (`Pairing over WiFi...`, `Connected to X over WiFi`)
+
+### Changed
+
+- USB is still preferred when the same UDID is visible over USB and WiFi
+- `NoUsbDeviceError` is now `NoDeviceError` (alias kept). The empty-device message mentions USB or WiFi, including a sleeping phone that is not advertising
+- First-run docs: plug in once, Trust, Developer Mode, leave WiFi enable on, then Connect on the same WiFi without the cable
+
 ## [0.2.1] - 2026-08-17
 
 ### Added
@@ -60,6 +75,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Checklist for Apple Mobile Device Support, Trust, and Developer Mode
 - pymobiledevice3 CoreDevice screen and HID through a userspace RSD tunnel
 
+[0.3.0]: https://github.com/helv-io/iphone-desk/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/helv-io/iphone-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/helv-io/iphone-desk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/helv-io/iphone-desk/releases/tag/v0.1.0

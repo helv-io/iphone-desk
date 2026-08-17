@@ -455,6 +455,7 @@ class DeskWindow(QMainWindow):
                 status.usb_present,
                 status.paired,
                 status.developer_mode,
+                status.wifi_present,
             )
         marks = {"ok": "[ok]", "wait": "[..]", "fail": "[!]"}
         lines = []
@@ -462,7 +463,7 @@ class DeskWindow(QMainWindow):
             lines.append(f"{marks.get(state, '[..]')} {label}")
         if status is not None and status.device_labels:
             lines.append("")
-            lines.append("USB devices: " + ", ".join(status.device_labels))
+            lines.append("Devices: " + ", ".join(status.device_labels))
         if status is not None and status.detail:
             lines.append("")
             lines.append(status.detail)
@@ -484,7 +485,8 @@ class DeskWindow(QMainWindow):
         extra = "" if summary.touch_available else "  taps blocked"
         self._info.setText(
             f"{summary.name}  iOS {summary.product_version}  "
-            f"{summary.display.width}x{summary.display.height}  {summary.mode}{extra}"
+            f"{summary.display.width}x{summary.display.height}  "
+            f"{summary.mode}  {summary.transport}{extra}"
         )
         self._stack.setCurrentIndex(1)
         self._screen.show()
