@@ -97,10 +97,10 @@ async def test_startmediastream_ios27_falls_back_to_screenshot(
 ) -> None:
     started: list[str] = []
 
-    async def boom(*, on_status: Any) -> None:
+    async def boom(self: DeviceSession, *, on_status: Any) -> None:
         raise RuntimeError(HELVIO_STARTMEDIASTREAM)
 
-    async def shots(fps: float, on_frame: Any, on_status: Any) -> None:
+    async def shots(self: DeviceSession, fps: float, on_frame: Any, on_status: Any) -> None:
         started.append("screenshot")
         on_status("screenshot ready")
 
